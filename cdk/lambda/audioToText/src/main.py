@@ -1,11 +1,19 @@
 import os
 import json
+import re
 import time
 import random
 import logging
 import boto3
 import psycopg
 import urllib.request
+
+# Canonical UUID format for the audio file identifier
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+# Maximum accepted length for the client-supplied file name component
+MAX_FILE_NAME_LENGTH = 200
 
 # Set up logging for the Lambda function
 logger = logging.getLogger()
@@ -124,6 +132,88 @@ def connect_to_db():
                 connection.close()
             raise
     return connection
+
+
+def reset_connection():
+    """
+    Recover the cached connection after a failed statement. Rolls back any
+    aborted transaction so the warm connection stays reusable; if rollback
+    itself fails, the connection is dropped so the next call reconnects.
+    """
+    global connection
+    if connection is None:
+        return
+    try:
+        connection.rollback()
+    except Exception:
+        try:
+            connection.close()
+        except Exception:
+            pass
+        connection = None
+
+
+def is_valid_audio_file_id(audio_file_id):
+    """Return True when the identifier matches the canonical UUID format."""
+    return bool(audio_file_id) and bool(UUID_RE.match(audio_file_id))
+
+
+def is_valid_file_name(file_name):
+    """
+    Return True when the file name is a safe single path component: no path
+    separators, no control characters, within length. Blocking separators
+    confines the key to the audio file's own prefix.
+    """
+    if not file_name or len(file_name) > MAX_FILE_NAME_LENGTH:
+        return False
+    if "/" in file_name or "\\" in file_name:
+        return False
+    if any(ord(c) < 32 for c in file_name):
+        return False
+    return True
+
+
+def check_authorization(user_id, audio_file_id):
+    """
+    Verify that the requesting user owns the case associated with the given
+    audio file. Resolves audio_file_id -> case -> owning student and compares
+    against the trusted user id from the authorizer context.
+
+    Args:
+        user_id: Database user ID from authorizer context
+        audio_file_id: Audio file ID from the request
+
+    Returns:
+        bool: True if the user owns the case, False otherwise
+    """
+    if not user_id or not audio_file_id:
+        logger.warning("Authorization failed: Missing user_id or audio_file_id")
+        return False
+
+    try:
+        conn = connect_to_db()
+        with conn.cursor() as cursor:
+            query = """
+                SELECT 1
+                FROM "audio_files" af
+                JOIN "cases" c ON af.case_id = c.case_id
+                WHERE af.audio_file_id = %s
+                  AND c.student_id = %s;
+            """
+            cursor.execute(query, (audio_file_id, user_id))
+            is_authorized = cursor.fetchone() is not None
+
+            if is_authorized:
+                logger.info(f"Authorization successful: User {user_id} authorized for audio file {audio_file_id}")
+            else:
+                logger.warning(f"Authorization failed: User {user_id} attempted unauthorized access to audio file {audio_file_id}")
+
+            return is_authorized
+
+    except Exception as e:
+        logger.error(f"Authorization check failed with error: {e}")
+        reset_connection()
+        return False
 
 
 def validate_file_integrity(bucket, key, file_type):
@@ -452,7 +542,18 @@ def handler(event, context):
                 publish_transcription_notification_event(audio_file_id, user_id, file_name, case_title, case_id, success=False, error_message=f"Missing parameters: {missing}")
             return _error_response(400, f"Missing parameters: {missing}", is_websocket, connection_id, ws_endpoint, request_id, event=event)
 
-        # 2a. Validate physical file integrity (Server-side validation)
+        # Constrain identifiers so the object key stays within the audio file's
+        # own prefix and the lookup receives a well-formed identifier.
+        if not is_valid_audio_file_id(audio_file_id) or not is_valid_file_name(file_name):
+            logger.error(f"Invalid identifiers for audio file request: audio_file_id={audio_file_id}")
+            return _error_response(400, "Invalid parameters", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+
+        # 2a. Verify the caller owns the case this audio file belongs to
+        if not check_authorization(user_id, audio_file_id):
+            logger.error(f"Access denied for user {user_id} on audio file {audio_file_id}")
+            return _error_response(403, "Access denied", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+
+        # 2b. Validate physical file integrity (Server-side validation)
         object_key = f"{audio_file_id}/{file_name}.{file_type}"
         validate_file_integrity(AUDIO_BUCKET, object_key, file_type)
 

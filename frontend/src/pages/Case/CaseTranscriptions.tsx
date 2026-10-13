@@ -260,14 +260,18 @@ const CaseTranscriptions: React.FC = () => {
 
     try {
       const audioFileId = uuidv4();
+
+      // Create the DB record first so the audio file is bound to the case
+      // before any upload capability is issued.
+      await initializeAudioFileInDb(audioFileId, audioFile.name);
+
       const presignedUrl = await generatePresignedUrl(audioFileId);
       if (!presignedUrl) {
         throw new Error("Failed to generate presigned URL");
       }
 
-      // Upload file to S3 and initialize DB record
+      // Upload file to S3
       await uploadFile(audioFile.file, presignedUrl);
-      await initializeAudioFileInDb(audioFileId, audioFile.name);
 
       // Trigger transcription via WebSocket (primary) or HTTP (fallback)
       if (isConnected) {

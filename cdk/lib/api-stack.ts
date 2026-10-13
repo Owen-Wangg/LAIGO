@@ -2057,16 +2057,24 @@ export class ApiGatewayStack extends cdk.Stack {
         code: lambda.Code.fromAsset("lambda/generatePreSignedURL"),
         handler: "generatePreSignedURL.lambda_handler",
         timeout: Duration.seconds(29),
-        memorySize: 128,
+        memorySize: 512,
+        vpc: vpcStack.vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [dbClientSg],
         environment: {
           BUCKET: audioStorageBucket.bucketName,
           REGION: this.region,
+          SM_DB_CREDENTIALS: db.secretPathUser.secretName,
+          RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
           ...corsEnv,
         },
         functionName: `${id}-GeneratePreSignedURLFunction`,
-        layers: [powertoolsLayer],
+        layers: [psycopg3Layer, powertoolsLayer],
       },
     );
+
+    // Grant access to the student database secret for ownership resolution
+    db.secretPathUser.grantRead(generatePreSignedURL);
 
     // Override the Logical ID of the Lambda Function to get ARN in OpenAPI
     const cfnGeneratePreSignedURL = generatePreSignedURL.node
