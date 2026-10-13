@@ -105,6 +105,8 @@ You must create a GitHub personal access token (classic) with the `repo` scope. 
 
 **Save the token value securely. You will upload it to AWS Secrets Manager in Step 2.**
 
+> **Important:** The token lets CDK create the Amplify app, but Amplify runs builds through the **Amplify GitHub App**. After deployment, open the Amplify app in the console, reconnect the repository using the GitHub App method, and authorize it on your repo. Until you do this, the Amplify build fails immediately with `Unable to assume specified IAM Role` (this error is about repo access, not IAM). See [setting up Amplify access to GitHub](https://docs.aws.amazon.com/amplify/latest/userguide/setting-up-GitHub-access.html).
+
 ### Enable Models in Bedrock
 
 This project provisions Bedrock guardrails and invokes foundation models from Lambda. In Amazon Bedrock Model access, enable at least:
