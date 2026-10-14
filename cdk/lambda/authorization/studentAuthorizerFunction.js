@@ -231,9 +231,36 @@ exports.handler = async (event) => {
       }
     }
 
-    // Use a scoped wildcard to allow caching across all endpoints within this role's scope
-    // This allows the authorizer to be cached while ensuring the policy doesn't leak access to other roles.
-    const resource = parts.slice(0, 2).join("/") + "/*/student/*";
+    // Build the IAM policy resource to match exactly what admitted this caller.
+    // The TOKEN authorizer result is cached per token for the configured TTL and
+    // reused across method ARNs, so the resource must never grant more than the
+    // per-route decision above.
+    const base = parts.slice(0, 2).join("/");
+
+    // Map a "METHOD /path" route key to its concrete method ARN.
+    const toRouteArn = (routeKey) => {
+      const spaceIndex = routeKey.indexOf(" ");
+      const routeMethod = routeKey.slice(0, spaceIndex);
+      const path = routeKey.slice(spaceIndex + 1);
+      return `${base}/${routeMethod}${path}`;
+    };
+
+    let resource;
+    if (hasStudentRole) {
+      // Student role holders are entitled to the whole /student/* scope;
+      // handlers enforce object-level ownership. A scoped wildcard keeps the
+      // cached result usable across all of this role's endpoints.
+      resource = `${base}/*/student/*`;
+    } else {
+      // Non-students were admitted only via the shared or instructor-case
+      // allowlists. Grant exactly those routes so the cached policy cannot be
+      // reused to reach any other /student/* operation.
+      const allowedRoutes = [...sharedRoutes];
+      if (hasInstructorRole) {
+        allowedRoutes.push(...instructorCaseRoutes);
+      }
+      resource = allowedRoutes.map(toRouteArn);
+    }
 
     // Build fresh IAM policy per invocation (no shared mutable state)
     return buildAuthResponse(user.user_id, "Allow", resource, {
