@@ -114,12 +114,24 @@ exports.handler = async (event) => {
     const lastName =
       attributes.find((attr) => attr.Name === "family_name")?.Value || "";
     const idpId = attributes.find((attr) => attr.Name === "sub")?.Value; // IDP User ID (UUID)
+    const emailVerified =
+      attributes.find((attr) => attr.Name === "email_verified")?.Value ===
+      "true";
 
     // Return error if email attribute is missing
     if (!email) {
       logger.error("Email attribute missing from Cognito");
       throw new UserError("Email attribute not found in Cognito user");
     }
+
+    // The stored user_email may only be (re)written from a freshly verified
+    // email during the initial sign-up confirmation. A self-service email
+    // change leaves email_verified=false, and later trigger sources such as
+    // PostConfirmation_ConfirmForgotPassword re-fire with an attribute the user
+    // controls; honouring those would let an account rewrite its email to a
+    // third party's address and inherit email-keyed role grants.
+    const canWriteEmail =
+      emailVerified && event.triggerSource === "PostConfirmation_ConfirmSignUp";
 
     // Normalize the email so storage and lookups match the lowercase form used
     // by the pre-signup trigger and the whitelist lookups.
@@ -163,18 +175,33 @@ exports.handler = async (event) => {
     if (targetRow) {
       // Update the existing row by its primary key. Roles are intentionally
       // left unchanged — this trigger never alters an existing user's roles.
-      logger.info("Updating existing user in database");
-      await sqlConnection`
-        UPDATE "users"
-        SET
-          first_name = ${firstName},
-          last_name = ${lastName},
-          last_sign_in = CURRENT_TIMESTAMP,
-          idp_id = ${idpId},
-          user_email = ${normalizedEmail}
-        WHERE user_id = ${targetRow.user_id}
-        RETURNING *;
-      `;
+      // user_email is only rewritten on a verified sign-up confirmation;
+      // otherwise the stored email is left as-is to prevent email takeover.
+      logger.info("Updating existing user in database", { canWriteEmail });
+      if (canWriteEmail) {
+        await sqlConnection`
+          UPDATE "users"
+          SET
+            first_name = ${firstName},
+            last_name = ${lastName},
+            last_sign_in = CURRENT_TIMESTAMP,
+            idp_id = ${idpId},
+            user_email = ${normalizedEmail}
+          WHERE user_id = ${targetRow.user_id}
+          RETURNING *;
+        `;
+      } else {
+        await sqlConnection`
+          UPDATE "users"
+          SET
+            first_name = ${firstName},
+            last_name = ${lastName},
+            last_sign_in = CURRENT_TIMESTAMP,
+            idp_id = ${idpId}
+          WHERE user_id = ${targetRow.user_id}
+          RETURNING *;
+        `;
+      }
     } else {
       // Determine the role for the new user
       let defaultRole;
