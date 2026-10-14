@@ -782,9 +782,11 @@ export class ApiGatewayStack extends cdk.Stack {
     );
 
     // Grant API Gateway permission to invoke the admin authorizer
-    adminAuthorizationFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    adminAuthorizationFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/authorizers/*`,
+    });
 
     // Override logical ID to match OpenAPI specification reference
     const apiGW_adminAuthorizationFunction = adminAuthorizationFunction.node
@@ -821,9 +823,11 @@ export class ApiGatewayStack extends cdk.Stack {
     db.dbInstance.grantConnect(studentAuthFunction, "applicationUsername");
 
     // Grant API Gateway permission to invoke the student authorizer
-    studentAuthFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    studentAuthFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/authorizers/*`,
+    });
 
     // Override logical ID to match OpenAPI specification reference
     const apiGW_studentauthorizationFunction = studentAuthFunction.node
@@ -862,9 +866,11 @@ export class ApiGatewayStack extends cdk.Stack {
     db.dbInstance.grantConnect(instructorAuthFunction, "applicationUsername");
 
     // Grant API Gateway permission to invoke the instructor authorizer
-    instructorAuthFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    instructorAuthFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/authorizers/*`,
+    });
 
     // Override logical ID to match OpenAPI specification reference
     const apiGW_instructorAuthorizationFunction = instructorAuthFunction.node
@@ -1503,9 +1509,11 @@ export class ApiGatewayStack extends cdk.Stack {
     );
 
     // Allow API Gateway to invoke the student cases lambda
-    lambdaStudentFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    lambdaStudentFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/*/*/student*`,
+    });
     messageLimitParameter.grantRead(lambdaStudentFunction);
     fileSizeLimitParameter.grantRead(lambdaStudentFunction);
     caseTypesParameter.grantRead(lambdaStudentFunction);
@@ -2629,15 +2637,12 @@ export class ApiGatewayStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(notificationServiceFunction)],
     });
 
-    // Grant EventBridge permission to invoke notification service
-    notificationServiceFunction.grantInvoke(
-      new iam.ServicePrincipal("events.amazonaws.com"),
-    );
-
     // Grant API Gateway permission to invoke the notification service
-    notificationServiceFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    notificationServiceFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/*/*/student/notifications*`,
+    });
 
     // Grant EventBridge permissions for instructor function feedback notifications
     lambdaInstructorFunction.addToRolePolicy(
