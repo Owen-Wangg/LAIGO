@@ -54,19 +54,25 @@ function buildAuthResponse(principalId, effect, resource, context) {
 // Caches JWKS (JSON Web Key Set) to avoid fetching on every invocation
 let jwtVerifier;
 
-// User metadata cache for Lambda execution context
-// Avoids repeated database queries within the same invocation
+// User metadata cache for the warm Lambda execution context.
+// Entries carry an expiry so that role changes in the database become
+// effective within a bounded window instead of persisting for the full
+// lifetime of a warm container. Kept in line with the API Gateway authorizer
+// result cache (authorizerResultTtlInSeconds: 60).
+const USER_METADATA_CACHE_TTL_MS = 60 * 1000;
 let userMetadataCache = {};
 
 /**
- * Query database to resolve idpId to userId and retrieve user metadata
- * Implements execution context caching to avoid repeated queries
+ * Query database to resolve idpId to userId and retrieve user metadata.
+ * Caches results across invocations with a bounded TTL so revoked roles stop
+ * being honored once the entry expires.
  */
 async function getUserMetadataFromDatabase(idpId, forceRefresh = false) {
-  // Check cache first
-  if (!forceRefresh && userMetadataCache[idpId]) {
+  // Serve from cache only when the entry has not expired.
+  const cached = userMetadataCache[idpId];
+  if (!forceRefresh && cached && Date.now() < cached.expiresAt) {
     logger.info("Using cached user metadata");
-    return userMetadataCache[idpId];
+    return cached.user;
   }
 
   // Ensure database connection is initialized
@@ -96,8 +102,11 @@ async function getUserMetadataFromDatabase(idpId, forceRefresh = false) {
       roles: result[0].roles,
     };
 
-    // Cache for this execution context
-    userMetadataCache[idpId] = user;
+    // Cache with a bounded expiry so stale roles cannot outlive the TTL.
+    userMetadataCache[idpId] = {
+      user,
+      expiresAt: Date.now() + USER_METADATA_CACHE_TTL_MS,
+    };
 
     return user;
   } catch (error) {
