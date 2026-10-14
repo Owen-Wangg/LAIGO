@@ -19,6 +19,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 import html2pdf from "html2pdf.js";
 import KeyboardDoubleArrowLeftIcon from "@mui/icons-material/KeyboardDoubleArrowLeft";
 import KeyboardDoubleArrowRightIcon from "@mui/icons-material/KeyboardDoubleArrowRight";
@@ -309,9 +310,10 @@ const CaseSummaries: React.FC = () => {
     ) as Promise<string>);
 
     // Combine and set innerHTML
-    element.innerHTML =
+    const combinedHtml =
       headerHtml +
       `<div class="markdown-body" style="font-size: 12px; line-height: 1.6;">${bodyHtml}</div>`;
+    element.innerHTML = DOMPurify.sanitize(combinedHtml);
 
     // Add custom styles for the PDF content - matching UI display
     const style = document.createElement("style");
