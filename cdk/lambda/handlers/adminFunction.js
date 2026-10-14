@@ -327,6 +327,15 @@ const routes = {
               WHERE instructor_id = ${instructor_id} AND student_id = ${student_id};
             `;
 
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "instructor_student.unassign",
+          subjectType: "user",
+          subjectId: student_id,
+          after: { instructor_id, student_id },
+        });
+
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: "Student unassigned successfully.",
@@ -1518,6 +1527,17 @@ const routes = {
               WHERE user_email = ${instructorEmail};
             `;
 
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "user_role.elevate_instructor",
+          subjectType: "user",
+          subjectId: existingUser[0].user_id,
+          subjectEmail: instructorEmail,
+          before: { roles: userRoles },
+          after: { roles: newRoles },
+        });
+
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: "User successfully elevated to instructor.",
@@ -1576,6 +1596,16 @@ const routes = {
       DELETE FROM "instructor_students"
       WHERE instructor_id = ${user_id};
     `;
+
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "user_role.lower_instructor",
+          subjectType: "user",
+          subjectId: user_id,
+          before: { roles: userRoles },
+          after: { roles: updatedRoles },
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -1640,6 +1670,15 @@ const routes = {
                 DELETE FROM "instructor_students"
                 WHERE instructor_id = ${instructor_id} AND student_id = ${student_id};
               `;
+
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "instructor_student.unassign",
+          subjectType: "user",
+          subjectId: student_id,
+          after: { instructor_id, student_id },
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -2089,6 +2128,16 @@ const routes = {
           Key: { email: { S: email } },
         }),
       );
+
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "whitelist.remove",
+        subjectType: "signup_whitelist",
+        subjectEmail: email,
+        before: { email },
+      });
+
       response.statusCode = 200;
       response.body = JSON.stringify({ message: "Entry removed", email });
     } catch (err) {

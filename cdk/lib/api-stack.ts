@@ -35,6 +35,7 @@ import * as route53 from "aws-cdk-lib/aws-route53";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 
 // Stack properties for API Gateway configuration
 interface ApiGatewayStackProps extends cdk.StackProps {
@@ -42,6 +43,7 @@ interface ApiGatewayStackProps extends cdk.StackProps {
   domainName?: string; // Optional custom domain (host only) registered in Amplify and used as the CORS origin
   frontendOrigin?: string; // Optional explicit frontend origin (full URL) for CORS lockdown without registering an Amplify custom domain
   sesVerifiedDomain?: string; // Optional SES verified domain for Cognito email (independent of domainName)
+  securityAlertEmail?: string; // Optional email address subscribed to the security-alerts SNS topic
 }
 
 /**
@@ -2784,6 +2786,20 @@ export class ApiGatewayStack extends cdk.Stack {
       topicName: `${id}-security-alerts`,
       displayName: "LAIGO Security Alerts",
     });
+
+    // Subscribe an email endpoint when one is supplied; otherwise the topic ARN
+    // output below remains the manual-subscription fallback.
+    if (props.securityAlertEmail && props.securityAlertEmail.trim().length > 0) {
+      const email = props.securityAlertEmail.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new Error(
+          `securityAlertEmail must be a valid email address, got: ${email}`,
+        );
+      }
+      securityAlertsTopic.addSubscription(
+        new subscriptions.EmailSubscription(email),
+      );
+    }
 
     const snsAlarmAction = new cloudwatchActions.SnsAction(securityAlertsTopic);
 

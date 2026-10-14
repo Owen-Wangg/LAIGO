@@ -19,6 +19,7 @@ const githubRepo = app.node.tryGetContext("GithubRepo");
 const domainName = app.node.tryGetContext("DomainName") || "";
 const frontendOrigin = app.node.tryGetContext("FrontendOrigin") || "";
 const sesVerifiedDomain = app.node.tryGetContext("SesVerifiedDomain") || "";
+const securityAlertEmail = app.node.tryGetContext("SecurityAlertEmail") || "";
 
 // Centralized tagging — replaces inline cdk.Tags.of(app).add() calls
 applyGlobalTags(app);
@@ -79,6 +80,7 @@ const api = new ApiGatewayStack(app, `${StackPrefix}-ApiStack`, db, vpc, {
   domainName: domainName,
   frontendOrigin: frontendOrigin,
   sesVerifiedDomain: sesVerifiedDomain,
+  securityAlertEmail: securityAlertEmail,
 });
 // Ensure API waits for database and dbFlow (change to CICD stack later)
 api.addDependency(db);

@@ -11,6 +11,7 @@ function synthApiStack(options: {
   environment?: string;
   domainName?: string;
   frontendOrigin?: string;
+  securityAlertEmail?: string;
 }): ApiGatewayStack {
   const app = new cdk.App({
     context:
@@ -35,6 +36,7 @@ function synthApiStack(options: {
     env: testEnv,
     domainName: options.domainName,
     frontendOrigin: options.frontendOrigin,
+    securityAlertEmail: options.securityAlertEmail,
     ecrRepositories: {
       textGeneration: textRepo,
       playgroundGeneration: playgroundRepo,
@@ -219,5 +221,53 @@ describe("ApiGatewayStack frontend origin without a custom domain", () => {
         ]),
       },
     });
+  });
+});
+
+describe("ApiGatewayStack security alert subscription", () => {
+  jest.setTimeout(300_000);
+
+  test("subscribes the provided email to the security-alerts topic", () => {
+    const api = synthApiStack({
+      environment: "prod",
+      frontendOrigin: "https://app.example.com",
+      securityAlertEmail: "security@example.com",
+    });
+    const template = Template.fromStack(api);
+
+    const topics = template.findResources("AWS::SNS::Topic", {
+      Properties: Match.objectLike({ TopicName: "TestApiStack-security-alerts" }),
+    });
+    const topicKeys = Object.keys(topics);
+    expect(topicKeys).toHaveLength(1);
+
+    template.hasResourceProperties("AWS::SNS::Subscription", {
+      Protocol: "email",
+      Endpoint: "security@example.com",
+      TopicArn: { Ref: topicKeys[0] },
+    });
+  });
+
+  test("synthesizes no email subscription when no address is provided", () => {
+    const api = synthApiStack({
+      environment: "prod",
+      frontendOrigin: "https://app.example.com",
+    });
+    const template = Template.fromStack(api);
+
+    const emailSubs = Object.values(
+      template.findResources("AWS::SNS::Subscription"),
+    ).filter((sub) => sub.Properties?.Protocol === "email");
+    expect(emailSubs).toHaveLength(0);
+  });
+
+  test("rejects a malformed security alert email at synth", () => {
+    expect(() =>
+      synthApiStack({
+        environment: "prod",
+        frontendOrigin: "https://app.example.com",
+        securityAlertEmail: "not-an-email",
+      }),
+    ).toThrow(/securityAlertEmail must be a valid email address/);
   });
 });
