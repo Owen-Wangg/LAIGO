@@ -8,6 +8,54 @@ const {
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "AdminFunction" });
 
+/**
+ * Persist a durable record of a security-critical administrative change.
+ *
+ * Writes one row to audit_log capturing the acting user, the affected subject,
+ * and the before/after state. Failures here are logged but never propagated:
+ * an audit write must not break the underlying mutation it accompanies.
+ *
+ * @param {Function} sqlConnection - postgres tagged-template connection
+ * @param {Object} entry
+ * @param {string} [entry.actorId] - acting user's id
+ * @param {string} [entry.actorEmail] - acting user's email
+ * @param {string} entry.action - machine-readable action name
+ * @param {string} [entry.subjectType] - type of the affected subject
+ * @param {string} [entry.subjectId] - id of the affected subject
+ * @param {string} [entry.subjectEmail] - email of the affected subject
+ * @param {*} [entry.before] - state before the change (serialized to jsonb)
+ * @param {*} [entry.after] - state after the change (serialized to jsonb)
+ */
+async function recordAudit(sqlConnection, entry) {
+  try {
+    const before =
+      entry.before === undefined || entry.before === null
+        ? null
+        : JSON.stringify(entry.before);
+    const after =
+      entry.after === undefined || entry.after === null
+        ? null
+        : JSON.stringify(entry.after);
+
+    await sqlConnection`
+      INSERT INTO audit_log (
+        actor_id, actor_email, action,
+        subject_type, subject_id, subject_email,
+        before_state, after_state
+      ) VALUES (
+        ${entry.actorId ?? null}, ${entry.actorEmail ?? null}, ${entry.action},
+        ${entry.subjectType ?? null}, ${entry.subjectId ?? null}, ${entry.subjectEmail ?? null},
+        ${before}::jsonb, ${after}::jsonb
+      );
+    `;
+  } catch (err) {
+    logger.error("Failed to write audit record", {
+      action: entry?.action,
+      errorMessage: err?.message,
+    });
+  }
+}
+
 const {
   SSMClient,
   GetParameterCommand,
@@ -236,6 +284,16 @@ const routes = {
                 ON CONFLICT (instructor_id, student_id) DO NOTHING;
               `;
 
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "instructor_student.assign",
+          subjectType: "user",
+          subjectId: student.user_id,
+          subjectEmail: student_email,
+          after: { instructor_id, student_id: student.user_id },
+        });
+
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: "Instructor and student linked successfully.",
@@ -454,6 +512,24 @@ const routes = {
               `;
         }
       }
+
+      const rolesAfter =
+        operation === "add"
+          ? currentRoles.includes(role)
+            ? currentRoles
+            : [...currentRoles, role]
+          : currentRoles.filter((r) => r !== role);
+
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "user_role.update",
+        subjectType: "user",
+        subjectId: userIdToUpdate,
+        subjectEmail: userEmail,
+        before: { roles: currentRoles },
+        after: { roles: rolesAfter },
+      });
 
       response.statusCode = 200;
       response.body = JSON.stringify({
@@ -716,6 +792,15 @@ const routes = {
               SET is_active = true
               WHERE prompt_version_id = ${prompt_version_id};
             `;
+      });
+
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.activate",
+        subjectType: "prompt_version",
+        subjectId: prompt_version_id,
+        after: { category, block_type, prompt_scope, is_active: true },
       });
 
       response.body = JSON.stringify({
@@ -1022,6 +1107,32 @@ const routes = {
       }
 
       await Promise.all(promises);
+
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "ai_config.update",
+        subjectType: "bedrock_config",
+        before: {
+          bedrock_llm_id: llmRes.Parameter.Value,
+          temperature: Number(tempRes.Parameter.Value),
+          top_p: Number(topPRes.Parameter.Value),
+          max_tokens: Number(maxTokensRes.Parameter.Value),
+        },
+        after: {
+          bedrock_llm_id: selectedModelId,
+          temperature: effectiveConfig.temperature,
+          top_p: effectiveConfig.top_p,
+          max_tokens: effectiveConfig.max_tokens,
+          ...(body.message_limit !== undefined && {
+            message_limit: Number(body.message_limit),
+          }),
+          ...(body.file_size_limit !== undefined && {
+            file_size_limit: Number(body.file_size_limit),
+          }),
+          ...(body.case_types !== undefined && { case_types: body.case_types }),
+        },
+      });
 
       response.statusCode = 200;
       response.body = JSON.stringify({ success: true });
@@ -1340,6 +1451,15 @@ const routes = {
               SET is_active = true
               WHERE disclaimer_id = ${disclaimer_id};
             `;
+      });
+
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.activate",
+        subjectType: "disclaimer",
+        subjectId: disclaimer_id,
+        after: { is_active: true },
       });
 
       response.body = JSON.stringify({
@@ -1695,6 +1815,16 @@ const routes = {
       }
       const { SSMClient, PutParameterCommand } = await import("@aws-sdk/client-ssm");
       const ssm = new SSMClient();
+      let previousMode = null;
+      try {
+        const current = await ssm.send(
+          new GetParameterCommand({ Name: process.env.SIGNUP_MODE_SSM_PARAM }),
+        );
+        previousMode = current.Parameter?.Value ?? null;
+      } catch {
+        previousMode = null;
+      }
+
       await ssm.send(
         new PutParameterCommand({
           Name: process.env.SIGNUP_MODE_SSM_PARAM,
@@ -1703,6 +1833,16 @@ const routes = {
           Type: "String",
         }),
       );
+
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "signup_mode.update",
+        subjectType: "signup_mode",
+        before: previousMode === null ? null : { mode: previousMode },
+        after: { mode },
+      });
+
       response.statusCode = 200;
       response.body = JSON.stringify({ mode });
     } catch (err) {
@@ -1909,6 +2049,14 @@ const routes = {
           Key: s3Key,
         }),
       );
+
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "whitelist.replace",
+        subjectType: "signup_whitelist",
+        after: { processed, invalid: invalidRows.length },
+      });
 
       response.statusCode = 200;
       response.body = JSON.stringify({

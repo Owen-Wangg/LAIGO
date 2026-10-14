@@ -4472,11 +4472,6 @@ paths:
           required: true
           schema:
             type: string
-        - in: query
-          name: cognito_token
-          required: true
-          schema:
-            type: string
       responses:
         "200":
           description: Transcription started

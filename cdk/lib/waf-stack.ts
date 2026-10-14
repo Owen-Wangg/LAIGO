@@ -91,6 +91,8 @@ export class WafStack extends cdk.Stack {
           arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
         }),
       ],
+      // Keep bearer tokens out of request logs
+      redactedFields: [{ singleHeader: { Name: "authorization" } }],
     });
 
     // Export WAF ARN for reference

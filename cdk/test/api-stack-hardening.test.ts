@@ -77,6 +77,36 @@ describe("ApiGatewayStack production hardening", () => {
     });
   });
 
+  test("Bedrock model-invocation logging disables prompt/completion text delivery", () => {
+    const serialized = JSON.stringify(template.toJSON());
+    expect(serialized).toContain('textDataDeliveryEnabled\\":false');
+    expect(serialized).not.toContain('textDataDeliveryEnabled\\":true');
+  });
+
+  test("Bedrock logging role does not use the CloudWatchLogsFullAccess managed policy", () => {
+    const serialized = JSON.stringify(template.toJSON());
+    expect(serialized).not.toContain("CloudWatchLogsFullAccess");
+  });
+
+  test("WAF API logging redacts the Authorization header", () => {
+    template.hasResourceProperties("AWS::WAFv2::LoggingConfiguration", {
+      RedactedFields: Match.arrayWith([
+        Match.objectLike({ SingleHeader: { Name: "authorization" } }),
+      ]),
+    });
+  });
+
+  test("all five security alarms notify the security topic", () => {
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    const alarmKeys = Object.keys(alarms);
+    expect(alarmKeys.length).toBeGreaterThanOrEqual(5);
+    for (const key of alarmKeys) {
+      const actions = alarms[key].Properties?.AlarmActions;
+      expect(Array.isArray(actions)).toBe(true);
+      expect(actions.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
   test("SignupMode SSM parameter defaults to whitelist", () => {
     template.hasResourceProperties("AWS::SSM::Parameter", {
       Name: "/LAIGO/SignupMode",
@@ -127,6 +157,16 @@ describe("ApiGatewayStack production guardrails", () => {
     template.hasResourceProperties("AWS::SSM::Parameter", {
       Name: "/LAIGO/SignupMode",
       Value: "public",
+    });
+  });
+
+  test("dev also disables full request/response body logging", () => {
+    const api = synthApiStack({ environment: "dev" });
+    const template = Template.fromStack(api);
+    template.hasResourceProperties("AWS::ApiGateway::Stage", {
+      MethodSettings: Match.arrayWith([
+        Match.objectLike({ DataTraceEnabled: false }),
+      ]),
     });
   });
 });

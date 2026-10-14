@@ -33,6 +33,7 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as ses from "aws-cdk-lib/aws-ses";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
 
 // Stack properties for API Gateway configuration
@@ -443,7 +444,7 @@ export class ApiGatewayStack extends cdk.Stack {
       deployOptions: {
         stageName: "prod", // Production stage
         loggingLevel: apigateway.MethodLoggingLevel.ERROR, // Log errors only
-        dataTraceEnabled: !isProd, // Dev only — avoids logging legal case content / PII in prod
+        dataTraceEnabled: false, // Never log full request/response bodies (legal case content / PII)
         metricsEnabled: true, // Enable CloudWatch metrics
         accessLogDestination: new apigateway.LogGroupLogDestination(
           accessLogGroup,
@@ -600,6 +601,8 @@ export class ApiGatewayStack extends cdk.Stack {
           arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
         }),
       ],
+      // Keep bearer tokens out of request logs
+      redactedFields: [{ singleHeader: { Name: "authorization" } }],
     });
 
     // Create single IAM role for all authenticated users
@@ -2690,18 +2693,29 @@ export class ApiGatewayStack extends cdk.Stack {
     // Custom Resource for Bedrock Logging
     const bedrockLoggingRole = new iam.Role(this, `${id}-BedrockLoggingRole`, {
       assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com"),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName("CloudWatchLogsFullAccess"),
-      ],
     });
 
     const bedrockLogGroup = new logs.LogGroup(
       this,
       `${id}-BedrockModelInvocations`,
       {
-        retention: logs.RetentionDays.ONE_MONTH,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        retention: isProd
+          ? logs.RetentionDays.THREE_MONTHS
+          : logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
       },
+    );
+
+    // Scope the Bedrock logging role to only this log group (least privilege)
+    bedrockLoggingRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        resources: [
+          bedrockLogGroup.logGroupArn,
+          `${bedrockLogGroup.logGroupArn}:log-stream:*`,
+        ],
+      }),
     );
 
     const enableBedrockLogging = new cr.AwsCustomResource(
@@ -2717,7 +2731,7 @@ export class ApiGatewayStack extends cdk.Stack {
                 logGroupName: bedrockLogGroup.logGroupName,
                 roleArn: bedrockLoggingRole.roleArn,
               },
-              textDataDeliveryEnabled: true,
+              textDataDeliveryEnabled: false,
               imageDataDeliveryEnabled: false,
               embeddingDataDeliveryEnabled: false,
             },
@@ -2733,7 +2747,7 @@ export class ApiGatewayStack extends cdk.Stack {
                 logGroupName: bedrockLogGroup.logGroupName,
                 roleArn: bedrockLoggingRole.roleArn,
               },
-              textDataDeliveryEnabled: true,
+              textDataDeliveryEnabled: false,
               imageDataDeliveryEnabled: false,
               embeddingDataDeliveryEnabled: false,
             },
@@ -2771,8 +2785,10 @@ export class ApiGatewayStack extends cdk.Stack {
       displayName: "LAIGO Security Alerts",
     });
 
+    const snsAlarmAction = new cloudwatchActions.SnsAction(securityAlertsTopic);
+
     // WAF Blocked Requests Alarm (API Gateway)
-    new cloudwatch.Alarm(this, `${id}-WafApiBlockedSpike`, {
+    const wafApiBlockedSpikeAlarm = new cloudwatch.Alarm(this, `${id}-WafApiBlockedSpike`, {
       metric: new cloudwatch.Metric({
         namespace: "AWS/WAFV2",
         metricName: "BlockedRequests",
@@ -2790,9 +2806,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "WAF API Gateway blocked request spike - possible active attack",
       alarmName: `${id}-waf-api-blocked-spike`,
     });
+    wafApiBlockedSpikeAlarm.addAlarmAction(snsAlarmAction);
 
     // WAF Rate Limit Triggers Alarm
-    new cloudwatch.Alarm(this, `${id}-WafRateLimitTriggers`, {
+    const wafRateLimitTriggersAlarm = new cloudwatch.Alarm(this, `${id}-WafRateLimitTriggers`, {
       metric: new cloudwatch.Metric({
         namespace: "AWS/WAFV2",
         metricName: "BlockedRequests",
@@ -2810,9 +2827,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "Multiple IPs hitting WAF rate limit - possible coordinated attack",
       alarmName: `${id}-waf-rate-limit-spike`,
     });
+    wafRateLimitTriggersAlarm.addAlarmAction(snsAlarmAction);
 
     // Per-User Rate Limit Alarm
-    new cloudwatch.Alarm(this, `${id}-WafPerUserRateLimit`, {
+    const wafPerUserRateLimitAlarm = new cloudwatch.Alarm(this, `${id}-WafPerUserRateLimit`, {
       metric: new cloudwatch.Metric({
         namespace: "AWS/WAFV2",
         metricName: "BlockedRequests",
@@ -2830,9 +2848,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "Multiple users hitting per-user rate limit - possible credential stuffing",
       alarmName: `${id}-waf-per-user-rate-spike`,
     });
+    wafPerUserRateLimitAlarm.addAlarmAction(snsAlarmAction);
 
     // API Gateway 5XX Error Alarm
-    new cloudwatch.Alarm(this, `${id}-Api5xxAlarm`, {
+    const api5xxAlarm = new cloudwatch.Alarm(this, `${id}-Api5xxAlarm`, {
       metric: this.api.metricServerError({
         statistic: "Sum",
         period: cdk.Duration.minutes(5),
@@ -2843,9 +2862,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "API Gateway 5XX error spike - backend failures",
       alarmName: `${id}-api-5xx-spike`,
     });
+    api5xxAlarm.addAlarmAction(snsAlarmAction);
 
     // API Gateway 4XX Error Alarm  
-    new cloudwatch.Alarm(this, `${id}-Api4xxAlarm`, {
+    const api4xxAlarm = new cloudwatch.Alarm(this, `${id}-Api4xxAlarm`, {
       metric: this.api.metricClientError({
         statistic: "Sum",
         period: cdk.Duration.minutes(5),
@@ -2856,6 +2876,7 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "API Gateway 4XX error spike - possible auth bypass attempts",
       alarmName: `${id}-api-4xx-spike`,
     });
+    api4xxAlarm.addAlarmAction(snsAlarmAction);
 
     // Security Dashboard
     new cloudwatch.Dashboard(this, `${id}-SecurityDashboard`, {
