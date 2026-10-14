@@ -770,8 +770,38 @@ def handler(event, context):
     case_id = body.get("case_id")
     block_type = body.get("block_type")
     
-    # --- Playground mode: skip authorization, use DB history + inline prompt ---
+    # --- Playground mode: staff-only, uses DB history + inline prompt ---
     if body.get("playground_mode"):
+        # Defense-in-depth: the playground capability is restricted to staff
+        # (admin or instructor). Resolve roles from both transports:
+        #   - WebSocket: forwarded as event["callerRoles"]
+        #   - REST: provided by the authorizer at
+        #     event["requestContext"]["authorizer"]["roles"] as a JSON string
+        caller_roles = event.get("callerRoles", [])
+        if not isinstance(caller_roles, list):
+            caller_roles = []
+
+        authorizer_roles_raw = request_context.get("authorizer", {}).get("roles")
+        if authorizer_roles_raw:
+            try:
+                parsed_roles = json.loads(authorizer_roles_raw)
+                if isinstance(parsed_roles, list):
+                    caller_roles = caller_roles + parsed_roles
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        is_staff = "admin" in caller_roles or "instructor" in caller_roles
+        if not is_staff:
+            logger.warning(
+                "Unauthorized playground access — caller lacks admin/instructor role",
+                userId=event.get("userId") or request_context.get("authorizer", {}).get("principalId"),
+            )
+            error_msg = "Forbidden: Administrative access required"
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 403}
+            return create_response(403, error_msg, event)
+
         custom_prompt = body.get("custom_prompt", "")
         test_id = body.get("session_id", "")
         block_type = body.get("block_type", "intake")
