@@ -1775,6 +1775,7 @@ export class ApiGatewayStack extends cdk.Stack {
           TABLE_NAME: `${id}-Conversation-Table`,
           GUARDRAIL_ID: textGenGuardrail.attrGuardrailId,
           GUARDRAIL_VERSION: textGenGuardrailVersion.attrVersion,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
@@ -1818,6 +1819,7 @@ export class ApiGatewayStack extends cdk.Stack {
           bedrockTopPParameter.parameterArn,
           bedrockMaxTokensParameter.parameterArn,
           caseTypesParameter.parameterArn,
+          messageLimitParameter.parameterArn,
         ],
       }),
     );
@@ -2009,6 +2011,7 @@ export class ApiGatewayStack extends cdk.Stack {
           BEDROCK_MAX_TOKENS_PARAM: bedrockMaxTokensParameter.parameterName,
           TABLE_NAME: `${id}-Conversation-Table`,
           PLAYGROUND_TABLE_NAME: playgroundTable.tableName,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
@@ -2049,6 +2052,7 @@ export class ApiGatewayStack extends cdk.Stack {
           bedrockTemperatureParameter.parameterArn,
           bedrockTopPParameter.parameterArn,
           bedrockMaxTokensParameter.parameterArn,
+          messageLimitParameter.parameterArn,
         ],
       }),
     );
@@ -2261,6 +2265,7 @@ export class ApiGatewayStack extends cdk.Stack {
           BEDROCK_TOP_P_PARAM: bedrockTopPParameter.parameterName,
           BEDROCK_MAX_TOKENS_PARAM: bedrockMaxTokensParameter.parameterName,
           TABLE_NAME: `${id}-Conversation-Table`,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
@@ -2290,6 +2295,7 @@ export class ApiGatewayStack extends cdk.Stack {
           bedrockTemperatureParameter.parameterArn,
           bedrockTopPParameter.parameterArn,
           bedrockMaxTokensParameter.parameterArn,
+          messageLimitParameter.parameterArn,
         ],
       }),
     );

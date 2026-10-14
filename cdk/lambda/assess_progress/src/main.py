@@ -8,6 +8,8 @@ from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
 
+from helpers.usage import check_and_increment_usage
+
 # Set up logging and metrics for the Lambda function
 logger = Logger(service="AssessProgress")
 metrics = Metrics(namespace="LAIGO", service="AssessProgress")
@@ -21,6 +23,7 @@ TABLE_NAME_PARAM = os.environ["TABLE_NAME_PARAM"]
 BEDROCK_TEMP_PARAM = os.environ.get("BEDROCK_TEMP_PARAM")
 BEDROCK_TOP_P_PARAM = os.environ.get("BEDROCK_TOP_P_PARAM")
 BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
+MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]
 
 # AWS Clients
 secrets_manager_client = boto3.client("secretsmanager")
@@ -36,6 +39,7 @@ TABLE_NAME = None
 BEDROCK_TEMP = 0.0
 BEDROCK_TOP_P = 0.9
 BEDROCK_MAX_TOKENS = 512
+MESSAGE_LIMIT = None
 PLAYGROUND_TABLE_NAME = os.environ.get("PLAYGROUND_TABLE_NAME")
 
 
@@ -420,7 +424,7 @@ def get_parameter(param_name, cached_var):
     return cached_var
 
 def initialize_constants():
-    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS
+    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS, MESSAGE_LIMIT
     try:
         BEDROCK_LLM_ID = get_parameter(BEDROCK_LLM_PARAM, BEDROCK_LLM_ID)
         TABLE_NAME = get_parameter(TABLE_NAME_PARAM, TABLE_NAME)
@@ -439,6 +443,10 @@ def initialize_constants():
             max_tokens_val = get_parameter(BEDROCK_MAX_TOKENS_PARAM, None)
             if max_tokens_val:
                 BEDROCK_MAX_TOKENS = int(max_tokens_val)
+
+        MESSAGE_LIMIT = get_parameter(MESSAGE_LIMIT_PARAM, MESSAGE_LIMIT)
+        if MESSAGE_LIMIT is None:
+            MESSAGE_LIMIT = "Infinity"
     except Exception as e:
         logger.exception("Failed to initialize constants")
         raise
@@ -941,7 +949,29 @@ def handler(event, context):
     CONVERSATION HISTORY PACKAGE:
     {assessment_context["formatted_context"]}
     """
-    
+
+    # Enforce the daily message limit before invoking Bedrock. Counts as one
+    # message per request and fails closed if the usage check cannot complete.
+    if MESSAGE_LIMIT != "Infinity":
+        try:
+            limit = int(MESSAGE_LIMIT)
+            conn = connect_to_db()
+            current_usage = check_and_increment_usage(conn, user_id)
+            logger.info(f"User {user_id} usage: {current_usage}/{limit}")
+            if current_usage > limit:
+                error_msg = "Daily message limit reached. Please contact your administrator."
+                if is_websocket and connection_id:
+                    send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                    return {"statusCode": 200}
+                return create_response(429, {"error": error_msg}, event)
+        except Exception as e:
+            logger.error(f"Error checking message limit: {e}")
+            error_msg = "Service temporarily unavailable. Please try again later."
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 503}
+            return create_response(503, {"error": error_msg}, event)
+
     try:
         logger.info(f"Invoking Bedrock model: {BEDROCK_LLM_ID}")
         start_time = time.time()

@@ -23,6 +23,7 @@ from helpers.chat import (
     retrieve_dynamodb_history,
     generate_full_case_summary,
 )
+from helpers.usage import check_and_increment_usage
 from aws_lambda_powertools import Logger, Metrics
 
 # Set up logging and metrics for the Lambda function
@@ -39,6 +40,7 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 BEDROCK_TEMP_PARAM = os.environ.get("BEDROCK_TEMP_PARAM")
 BEDROCK_TOP_P_PARAM = os.environ.get("BEDROCK_TOP_P_PARAM")
 BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
+MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]
 # AWS Clients
 secrets_manager_client = boto3.client("secretsmanager")
 ssm_client = boto3.client("ssm", region_name=REGION)
@@ -52,6 +54,7 @@ BEDROCK_LLM_ID = None
 BEDROCK_TEMP = 0.5
 BEDROCK_TOP_P = 0.9
 BEDROCK_MAX_TOKENS = 2048
+MESSAGE_LIMIT = None
 
 FULL_CASE_BLOCK_TYPES = ["intake", "legal_analysis", "contrarian", "policy"]
 
@@ -113,7 +116,7 @@ def get_parameter(param_name, cached_var):
     return cached_var
 
 def initialize_constants():
-    global BEDROCK_LLM_ID, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS
+    global BEDROCK_LLM_ID, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS, MESSAGE_LIMIT
     BEDROCK_LLM_ID = get_parameter(BEDROCK_LLM_PARAM, BEDROCK_LLM_ID)
 
     if BEDROCK_TEMP_PARAM:
@@ -130,6 +133,10 @@ def initialize_constants():
         max_tokens_val = get_parameter(BEDROCK_MAX_TOKENS_PARAM, None)
         if max_tokens_val:
             BEDROCK_MAX_TOKENS = int(max_tokens_val)
+
+    MESSAGE_LIMIT = get_parameter(MESSAGE_LIMIT_PARAM, MESSAGE_LIMIT)
+    if MESSAGE_LIMIT is None:
+        MESSAGE_LIMIT = "Infinity"
 
 
     
@@ -668,6 +675,20 @@ def handler(event, context):
     except Exception as e:
         logger.error(f"Error getting LLM from Bedrock: {e}")
         return _error_response(500, 'An unexpected error occurred. Please try again later or contact an administrator.', is_websocket, connection_id, ws_endpoint, request_id, event=event)
+
+    # Enforce the daily message limit before invoking Bedrock. Counts as one
+    # message per request and fails closed if the usage check cannot complete.
+    if MESSAGE_LIMIT != "Infinity":
+        try:
+            limit = int(MESSAGE_LIMIT)
+            conn = connect_to_db()
+            current_usage = check_and_increment_usage(conn, user_id)
+            logger.info(f"User {user_id} usage: {current_usage}/{limit}")
+            if current_usage > limit:
+                return _error_response(429, "Daily message limit reached. Please contact your administrator.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+        except Exception as e:
+            logger.error(f"Error checking message limit: {e}")
+            return _error_response(503, "Service temporarily unavailable. Please try again later.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
 
     # --- Full Case Summary Logic ---
     if sub_route == "full-case":
