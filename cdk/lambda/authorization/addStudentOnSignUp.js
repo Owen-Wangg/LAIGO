@@ -27,6 +27,8 @@ const dynamoClient = new DynamoDBClient();
 
 /**
  * Looks up the signup mode from SSM. Returns 'public' if not configured.
+ * On any read failure it returns 'public', which maps to the least-privileged
+ * role in the handler, so an unreadable parameter can never escalate access.
  */
 async function getSignupMode() {
   if (!SIGNUP_MODE_PARAM) return "public";
@@ -36,7 +38,10 @@ async function getSignupMode() {
     );
     return result?.Parameter?.Value || "public";
   } catch (err) {
-    logger.warn("Could not read SignupMode SSM param, defaulting to public", { err });
+    logger.warn(
+      "Could not read SignupMode SSM param; resolving to least-privileged role",
+      { err },
+    );
     return "public";
   }
 }
@@ -116,13 +121,48 @@ exports.handler = async (event) => {
       throw new UserError("Email attribute not found in Cognito user");
     }
 
-    // Check if user already exists in database
-    const existingUser = await sqlConnection`
-      SELECT * FROM "users" WHERE idp_id = ${idpId} OR user_email = ${email};
+    // Normalize the email so storage and lookups match the lowercase form used
+    // by the pre-signup trigger and the whitelist lookups.
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Look up any existing row for this identity or email, including the
+    // currently bound identity so we can tell a rebind from a conflict.
+    // Email is compared in canonical (lowercased, trimmed) form so rows stored
+    // in a non-canonical form by earlier writes are still matched.
+    const existingUsers = await sqlConnection`
+      SELECT user_id, idp_id, user_email
+      FROM "users"
+      WHERE idp_id = ${idpId} OR lower(trim(user_email)) = ${normalizedEmail};
     `;
 
-    if (existingUser.length > 0) {
-      // Update existing user's information
+    const emailMatch = existingUsers.find(
+      (row) =>
+        typeof row.user_email === "string" &&
+        row.user_email.toLowerCase().trim() === normalizedEmail,
+    );
+    const idpMatch = existingUsers.find((row) => row.idp_id === idpId);
+
+    // A row already bound to a different identity must not be re-bound here:
+    // doing so would hand the new identity the existing row's user_id and roles.
+    // Leave it untouched and let the account proceed without a profile until an
+    // administrator reconciles it (see docs/userRemovalGuide.md).
+    const conflictingEmailRow =
+      emailMatch && emailMatch.idp_id && emailMatch.idp_id !== idpId;
+
+    if (conflictingEmailRow) {
+      logger.warn(
+        "Email already bound to an existing identity; skipping profile rebind",
+      );
+      return event;
+    }
+
+    // Resolve the row to update: prefer the identity match, otherwise the email
+    // row that is unbound or already bound to this identity.
+    const targetRow = idpMatch || emailMatch;
+
+    if (targetRow) {
+      // Update the existing row by its primary key. Roles are intentionally
+      // left unchanged — this trigger never alters an existing user's roles.
       logger.info("Updating existing user in database");
       await sqlConnection`
         UPDATE "users"
@@ -130,11 +170,11 @@ exports.handler = async (event) => {
           first_name = ${firstName},
           last_name = ${lastName},
           last_sign_in = CURRENT_TIMESTAMP,
-          idp_id = ${idpId}
-        WHERE user_email = ${email}
+          idp_id = ${idpId},
+          user_email = ${normalizedEmail}
+        WHERE user_id = ${targetRow.user_id}
         RETURNING *;
       `;
-
     } else {
       // Determine the role for the new user
       let defaultRole;
@@ -149,26 +189,28 @@ exports.handler = async (event) => {
         defaultRole = "admin";
         logger.info("First user in system, assigning admin role");
       } else {
-        // Check signup mode to determine role
+        // Check signup mode to determine role. Any inability to determine the
+        // mode or the whitelist role resolves to the least-privileged role so
+        // an error path can never grant more than student access.
         const signupMode = await getSignupMode();
         logger.info("New user signup", { signupMode });
 
         if (signupMode === "whitelist") {
           // Look up the canonical role from the DynamoDB whitelist
-          const whitelistRole = await getWhitelistRole(email);
+          const whitelistRole = await getWhitelistRole(normalizedEmail);
           if (whitelistRole) {
             defaultRole = whitelistRole;
             logger.info("Assigning role from whitelist", { defaultRole });
           } else {
-            // Fallback: whitelist check in preSignup should have blocked this,
-            // but defensively default to student if something slips through
+            // Whitelist check in preSignup should have blocked this; default to
+            // the least-privileged role if the role cannot be determined here.
             logger.warn(
-              "Email not in whitelist during post-confirmation, defaulting to student",
+              "Whitelist role could not be determined, defaulting to student",
             );
             defaultRole = "student";
           }
         } else {
-          // Public mode: default to student
+          // Public mode (and the fail-closed default): least-privileged role.
           defaultRole = "student";
         }
       }
@@ -181,7 +223,7 @@ exports.handler = async (event) => {
       // Create new user with the determined role
       await sqlConnection`
         INSERT INTO "users" (idp_id, user_email, first_name, last_name, time_account_created, roles, last_sign_in)
-        VALUES (${idpId}, ${email}, ${firstName}, ${lastName}, CURRENT_TIMESTAMP, ARRAY[${defaultRole}]::user_role[], CURRENT_TIMESTAMP)
+        VALUES (${idpId}, ${normalizedEmail}, ${firstName}, ${lastName}, CURRENT_TIMESTAMP, ARRAY[${defaultRole}]::user_role[], CURRENT_TIMESTAMP)
         RETURNING *;
       `;
 
