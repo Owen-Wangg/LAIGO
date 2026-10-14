@@ -92,6 +92,11 @@ def connect_to_db():
             "password": secret["password"],
             "host": RDS_PROXY_ENDPOINT,
             "port": secret["port"],
+            # Require TLS and verify the server certificate and hostname against
+            # the system trust store (the RDS Proxy presents an ACM-issued
+            # certificate from a public Amazon CA).
+            "sslmode": "verify-full",
+            "sslrootcert": "system",
         }
         conn_str = " ".join(f"{k}={v}" for k, v in params.items())
         try:

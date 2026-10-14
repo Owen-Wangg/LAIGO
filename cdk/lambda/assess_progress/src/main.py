@@ -477,7 +477,11 @@ def connect_to_db():
             'password': secret["password"],
             'host': RDS_PROXY_ENDPOINT,
             'port': secret["port"],
-            'sslmode': 'require'  # Require SSL connection
+            # Require TLS and verify the server certificate and hostname against
+            # the system trust store (the RDS Proxy presents an ACM-issued
+            # certificate from a public Amazon CA).
+            'sslmode': 'verify-full',
+            'sslrootcert': 'system'
         }
         connection_string = " ".join([f"{key}={value}" for key, value in connection_params.items()])
         connection = psycopg.connect(connection_string)
