@@ -137,15 +137,27 @@ exports.handler = async (event) => {
     // by the pre-signup trigger and the whitelist lookups.
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Look up any existing row for this identity or email, including the
-    // currently bound identity so we can tell a rebind from a conflict.
+    // Look up any existing row for this identity, and — only when the email is
+    // trusted (a freshly verified sign-up confirmation) — any row matching the
+    // email as well, so a verified confirmation can link a pre-provisioned or
+    // whitelist-seeded row. When the email is not trusted it must never drive
+    // row matching: an attacker could otherwise point an unverified attribute
+    // at another user's address and inherit that row's user_id and roles, so
+    // we restrict the lookup to the caller's own identity. The currently bound
+    // identity is included so we can tell a legitimate rebind from a conflict.
     // Email is compared in canonical (lowercased, trimmed) form so rows stored
     // in a non-canonical form by earlier writes are still matched.
-    const existingUsers = await sqlConnection`
-      SELECT user_id, idp_id, user_email
-      FROM "users"
-      WHERE idp_id = ${idpId} OR lower(trim(user_email)) = ${normalizedEmail};
-    `;
+    const existingUsers = canWriteEmail
+      ? await sqlConnection`
+          SELECT user_id, idp_id, user_email
+          FROM "users"
+          WHERE idp_id = ${idpId} OR lower(trim(user_email)) = ${normalizedEmail};
+        `
+      : await sqlConnection`
+          SELECT user_id, idp_id, user_email
+          FROM "users"
+          WHERE idp_id = ${idpId};
+        `;
 
     const emailMatch = existingUsers.find(
       (row) =>
@@ -202,6 +214,16 @@ exports.handler = async (event) => {
           RETURNING *;
         `;
       }
+    } else if (!canWriteEmail) {
+      // No row is bound to this identity and the email is not from a freshly
+      // verified sign-up confirmation. Creating a profile here would seed a row
+      // (and a whitelist-derived role) from an untrusted, user-controlled email
+      // address. Skip creation: the account proceeds without a profile until a
+      // verified sign-up confirmation runs or an administrator reconciles it
+      // (see docs/userRemovalGuide.md).
+      logger.warn(
+        "No identity-matched user row and email is unverified; skipping profile creation",
+      );
     } else {
       // Determine the role for the new user
       let defaultRole;
