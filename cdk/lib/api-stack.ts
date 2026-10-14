@@ -7,11 +7,15 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import { Construct } from "constructs";
 import { Duration } from "aws-cdk-lib";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import { VpcStack } from "./vpc-stack";
 import { DatabaseStack } from "./database-stack";
 import { applyStandardTags } from "./shared/tagging";
+import { isProdEnvironment } from "./shared/environment";
 import { Fn } from "aws-cdk-lib";
 import { Asset } from "aws-cdk-lib/aws-s3-assets";
 import * as s3 from "aws-cdk-lib/aws-s3";
@@ -34,7 +38,8 @@ import * as sns from "aws-cdk-lib/aws-sns";
 // Stack properties for API Gateway configuration
 interface ApiGatewayStackProps extends cdk.StackProps {
   ecrRepositories: { [key: string]: ecr.Repository }; // ECR repositories for Lambda Docker images
-  domainName?: string; // Optional custom domain for CORS origin lockdown and Amplify
+  domainName?: string; // Optional custom domain (host only) registered in Amplify and used as the CORS origin
+  frontendOrigin?: string; // Optional explicit frontend origin (full URL) for CORS lockdown without registering an Amplify custom domain
   sesVerifiedDomain?: string; // Optional SES verified domain for Cognito email (independent of domainName)
 }
 
@@ -107,19 +112,37 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // Determine environment for conditional configuration
-    const isProd = this.node.tryGetContext("Environment") === "production";
+    const isProd = isProdEnvironment(this);
 
-    if (isProd && !props.domainName) {
+    // Compute the allowed CORS origin. A custom domain takes precedence and is
+    // expressed as an https origin; otherwise an explicit frontend origin (e.g.
+    // the Amplify-managed URL) is used verbatim with any trailing slash removed.
+    const allowedOrigin = props.domainName
+      ? `https://${props.domainName}`
+      : props.frontendOrigin
+        ? props.frontendOrigin.replace(/\/+$/, "")
+        : "";
+
+    // Validate that a configured origin is a single concrete https origin.
+    // This rejects wildcards, non-https schemes, comma-separated lists, paths,
+    // whitespace, and any characters that could break out of the YAML scalar
+    // the value is later spliced into — all of which would otherwise satisfy
+    // the emptiness-only production guard below.
+    if (allowedOrigin && !/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(allowedOrigin)) {
       throw new Error(
-        "DomainName context is required for production deployments so CORS is restricted to your frontend origin (pass -c DomainName=your.domain).",
+        `Invalid frontend origin "${allowedOrigin}". Provide a single concrete https origin, e.g. https://app.example.com (pass -c DomainName as a bare host, or -c FrontendOrigin as a full https URL).`,
+      );
+    }
+
+    if (isProd && !allowedOrigin) {
+      throw new Error(
+        "A frontend origin is required for production deployments so CORS is restricted. Pass -c DomainName=your.domain for a custom domain, or -c FrontendOrigin=https://main.xxxxx.amplifyapp.com to use the Amplify-managed domain.",
       );
     }
 
     // Initialize Lambda layers collection
     this.layerList = {};
 
-    // Compute allowed CORS origin from optional domainName prop
-    const allowedOrigin = props.domainName ? `https://${props.domainName}` : "";
     const localDevOrigin = "http://localhost:5173";
     const s3CorsAllowedOrigins = allowedOrigin
       ? isProd
@@ -376,20 +399,25 @@ export class ApiGatewayStack extends cdk.Stack {
       });
     };
 
-    // Load OpenAPI specification from file
-    // The spec uses Fn::Sub with ${CorsAllowedOrigin} for Access-Control-Allow-Origin.
-    // A CfnParameter supplies the value at deploy time via AWS::Include resolution.
-    const corsOriginParam = new cdk.CfnParameter(this, "CorsAllowedOrigin", {
-      type: "String",
-      default: "*",
-      description: "Value for Access-Control-Allow-Origin in API Gateway MOCK responses",
-    });
-    if (allowedOrigin) {
-      corsOriginParam.default = allowedOrigin;
-    }
+    // Load the OpenAPI specification and resolve the Access-Control-Allow-Origin
+    // placeholder at synth time. The spec references ${CorsAllowedOrigin} in its
+    // CORS response headers; substituting the concrete origin here keeps the
+    // deployed value in lockstep with the synthesized stack. Falls back to "*"
+    // when no origin is configured (non-production without a frontend origin).
+    const corsOriginValue = allowedOrigin || "*";
+    const specPath = "OpenAPI_Swagger_Definition.yaml";
+    const resolvedSpec = fs
+      .readFileSync(specPath, "utf8")
+      .split("${CorsAllowedOrigin}")
+      .join(corsOriginValue);
+    const resolvedSpecPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "laigo-openapi-")),
+      "OpenAPI_Swagger_Definition.yaml",
+    );
+    fs.writeFileSync(resolvedSpecPath, resolvedSpec);
 
     const asset = new Asset(this, "SampleAsset", {
-      path: "OpenAPI_Swagger_Definition.yaml",
+      path: resolvedSpecPath,
     });
 
     // Transform OpenAPI spec for API Gateway (resolves CloudFormation intrinsic functions)
@@ -1449,7 +1477,7 @@ export class ApiGatewayStack extends cdk.Stack {
       {
         parameterName: "/LAIGO/SignupMode",
         description: "Controls signup access: 'public' allows all, 'whitelist' restricts to email_whitelist table",
-        stringValue: "public",
+        stringValue: isProd ? "whitelist" : "public",
       },
     );
 

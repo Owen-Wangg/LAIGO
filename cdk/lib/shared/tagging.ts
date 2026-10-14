@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import { IConstruct } from "constructs";
 import { IAspect, Annotations, CfnResource, Tags, TagManager } from "aws-cdk-lib";
+import { resolveEnvironment } from "./environment";
 
 // Re-export Tags for convenience
 export { Tags };
@@ -96,6 +97,7 @@ export function validateTagValue(
  *
  * Throws if StackPrefix is missing/empty or fails validation.
  * Throws if Owner or CostCenter are provided but fail validation.
+ * Throws if Environment is set to a value outside the accepted set.
  */
 export function applyGlobalTags(app: cdk.App): void {
   // Read context parameters
@@ -132,8 +134,9 @@ export function applyGlobalTags(app: cdk.App): void {
     }
   }
 
-  // Determine effective values (with defaults)
-  const effectiveEnvironment = environment && environment.trim().length > 0 ? environment : "development";
+  // Resolve the environment to its canonical form, failing synth early on an
+  // unrecognized value and defaulting to "dev" when unset.
+  const effectiveEnvironment = resolveEnvironment(environment);
   const effectiveOwner = owner && owner.trim().length > 0 ? owner : "LAIGO-Team";
   const effectiveCostCenter = costCenter && costCenter.trim().length > 0 ? costCenter : "Engineering";
 
