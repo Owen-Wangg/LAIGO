@@ -5,6 +5,11 @@ const {
   handleError,
   getSqlConnection,
 } = require("./utils/utils");
+const {
+  isValidWhitelistKey,
+  parseWhitelistCsv,
+  computeWhitelistReconciliation,
+} = require("./utils/whitelistUpload");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "AdminFunction" });
 
@@ -2098,6 +2103,13 @@ const routes = {
         return;
       }
 
+      // Only read objects from the key namespace this endpoint's own GET mints.
+      if (!isValidWhitelistKey(s3Key)) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({ error: "Invalid 's3Key'" });
+        return;
+      }
+
       const { S3Client, GetObjectCommand } = await import("@aws-sdk/client-s3");
       const s3 = new S3Client();
       const bucketName = process.env.WHITELIST_UPLOAD_BUCKET;
@@ -2123,41 +2135,29 @@ const routes = {
         labelToRole[key] = key;
       }
 
-      // Parse CSV lines
-      const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      const validItems = [];
-      const invalidRows = [];
+      const { validItems, invalidRows } = parseWhitelistCsv(csvText, labelToRole);
 
-      for (let i = 0; i < lines.length; i++) {
-        const parts = lines[i].split(",");
-        const email = (parts[0] || "").trim().toLowerCase();
-        const label = (parts[1] || "").trim();
-
-        // Skip header row if label column literally says "role"
-        if (i === 0 && label.toLowerCase() === "role") continue;
-
-        const canonicalRole = labelToRole[label.toLowerCase()];
-
-        if (!email || !email.includes("@") || !canonicalRole) {
-          invalidRows.push({
-            row: i + 1,
-            email,
-            label,
-            reason: !canonicalRole ? "unknown role label" : "invalid email",
-          });
-          continue;
-        }
-
-        validItems.push({ email, canonical_role: canonicalRole, uploaded_label: label });
+      // A parse that produced no valid rows must never mutate the table: this
+      // whitelist mints user roles at signup, so an empty or malformed CSV
+      // would otherwise silently wipe it. Leave the table and the uploaded
+      // object untouched so the admin can inspect and fix the file.
+      if (validItems.length === 0) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({
+          error: "No valid rows found in CSV; whitelist unchanged",
+          invalid: invalidRows.length,
+          invalidRows,
+        });
+        return;
       }
 
-      // Replace mode: delete all existing entries, then write new ones
       const { DynamoDBClient, BatchWriteItemCommand, ScanCommand } = await import("@aws-sdk/client-dynamodb");
       const dynamo = new DynamoDBClient();
       const tableName = process.env.WHITELIST_TABLE_NAME;
       const CHUNK_SIZE = 25;
 
-      // Step 1: Scan and delete all existing entries
+      // Snapshot the existing emails so we can reconcile against the new set.
+      const existingEmails = [];
       let lastKey = undefined;
       do {
         const scanResult = await dynamo.send(
@@ -2167,27 +2167,23 @@ const routes = {
             ...(lastKey && { ExclusiveStartKey: lastKey }),
           }),
         );
-        const items = scanResult.Items || [];
-        lastKey = scanResult.LastEvaluatedKey;
-
-        for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-          const chunk = items.slice(i, i + CHUNK_SIZE);
-          const deleteRequests = chunk.map((item) => ({
-            DeleteRequest: { Key: { email: item.email } },
-          }));
-          await dynamo.send(
-            new BatchWriteItemCommand({
-              RequestItems: { [tableName]: deleteRequests },
-            }),
-          );
+        for (const item of scanResult.Items || []) {
+          if (item.email?.S) existingEmails.push(item.email.S);
         }
+        lastKey = scanResult.LastEvaluatedKey;
       } while (lastKey);
 
-      // Step 2: Write new entries in batches of 25
-      let processed = 0;
+      const { toPut, toDelete } = computeWhitelistReconciliation(
+        existingEmails,
+        validItems,
+      );
 
-      for (let i = 0; i < validItems.length; i += CHUNK_SIZE) {
-        const chunk = validItems.slice(i, i + CHUNK_SIZE);
+      // Write-first: upsert all new rows before pruning any stale ones. If a
+      // batch fails mid-run the table still holds the old rows plus whatever
+      // new rows landed — it is never left empty.
+      let processed = 0;
+      for (let i = 0; i < toPut.length; i += CHUNK_SIZE) {
+        const chunk = toPut.slice(i, i + CHUNK_SIZE);
         const putRequests = chunk.map((item) => ({
           PutRequest: {
             Item: {
@@ -2203,6 +2199,19 @@ const routes = {
           }),
         );
         processed += chunk.length;
+      }
+
+      // Prune only the rows absent from the new set, after all puts succeeded.
+      for (let i = 0; i < toDelete.length; i += CHUNK_SIZE) {
+        const chunk = toDelete.slice(i, i + CHUNK_SIZE);
+        const deleteRequests = chunk.map((email) => ({
+          DeleteRequest: { Key: { email: { S: email } } },
+        }));
+        await dynamo.send(
+          new BatchWriteItemCommand({
+            RequestItems: { [tableName]: deleteRequests },
+          }),
+        );
       }
 
       // Clean up uploaded object after processing.
