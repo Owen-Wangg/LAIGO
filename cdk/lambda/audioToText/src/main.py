@@ -664,6 +664,6 @@ def handler(event, context):
             else:
                 qs = event.get("queryStringParameters") or {}
                 afid = qs.get("audio_file_id", "unknown")
-            publish_transcription_notification_event(afid, user_id_for_notif, file_name=None, case_name=None, case_id=None, success=False, error_message=str(e))
+            publish_transcription_notification_event(afid, user_id_for_notif, file_name=None, case_name=None, case_id=None, success=False, error_message="Internal server error")
 
-        return _error_response(500, str(e), is_websocket, connection_id, ws_endpoint, request_id, event=event)
+        return _error_response(500, "Internal server error", is_websocket, connection_id, ws_endpoint, request_id, event=event)

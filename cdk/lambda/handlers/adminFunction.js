@@ -617,11 +617,11 @@ const routes = {
 
       if (!event.body) throw new Error("Request body is missing");
 
-      const { category, block_type, prompt_text, version_name, author_id, prompt_scope } =
+      const { category, block_type, prompt_text, version_name, prompt_scope } =
         parseBody(event.body);
 
-      // Trust authenticated user identity when author_id is not provided by client.
-      const promptAuthorId = author_id || user_id;
+      // Authorship is derived from the authenticated caller, not the request body.
+      const promptAuthorId = user_id;
       const resolvedScope = prompt_scope || 'block';
 
       if (!category || !prompt_text)
@@ -660,6 +660,21 @@ const routes = {
             }, ${prompt_text}, ${promptAuthorId || null}, false)
             RETURNING *;
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.create",
+        subjectType: "prompt_version",
+        subjectId: insertPrompt[0].prompt_version_id,
+        after: {
+          category,
+          block_type: block_type || null,
+          prompt_scope: resolvedScope,
+          version_number: nextVersion,
+          version_name: version_name || null,
+        },
+      });
 
       response.body = JSON.stringify(insertPrompt[0]);
     } catch (err) {
@@ -1361,9 +1376,9 @@ const routes = {
 
       if (!event.body) throw new Error("Request body is missing");
 
-      const { disclaimer_text, version_name, author_id } = parseBody(event.body);
-      // Prefer the authenticated user as author, but allow explicit override when provided
-      const disclaimerAuthorId = author_id || user_id;
+      const { disclaimer_text, version_name } = parseBody(event.body);
+      // Authorship is derived from the authenticated caller, not the request body.
+      const disclaimerAuthorId = user_id;
 
       if (!disclaimer_text)
         throw new Error("Missing 'disclaimer_text' in request body");
@@ -1382,6 +1397,18 @@ const routes = {
             VALUES (${disclaimer_text}, ${nextVersion}, ${version_name || null}, ${disclaimerAuthorId || null}, false)
             RETURNING *;
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.create",
+        subjectType: "disclaimer",
+        subjectId: insertResult[0].disclaimer_id,
+        after: {
+          version_number: nextVersion,
+          version_name: version_name || null,
+        },
+      });
 
       response.body = JSON.stringify(insertResult[0]);
     } catch (err) {

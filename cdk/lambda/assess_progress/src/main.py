@@ -886,9 +886,9 @@ def handler(event, context):
         except Exception as e:
             logger.exception(f"Playground assessment error: {e}")
             if is_websocket and connection_id:
-                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=str(e))
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content="Internal server error")
                 return {"statusCode": 500}
-            return create_response(500, f"Internal server error: {str(e)}", event)
+            return create_response(500, "Internal server error", event)
     
     # --- Standard mode: requires case_id and authorization ---
     logger.info(f"Processing assessment for Case ID: {case_id}, Block Type: {block_type}")
@@ -1016,6 +1016,6 @@ def handler(event, context):
     except Exception as e:
         logger.exception(f"Unexpected error during assessment execution: {e}")
         if is_websocket and connection_id:
-            send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=str(e))
+            send_to_websocket(connection_id, ws_endpoint, request_id, "error", content="Internal server error")
             return {"statusCode": 500}
-        return create_response(500, f"Internal server error: {str(e)}", event)
+        return create_response(500, "Internal server error", event)
