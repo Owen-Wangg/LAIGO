@@ -679,11 +679,11 @@ function getOriginHeader(event) {
   if (!allowedOrigin) {
     if (!corsWildcardWarned) {
       logger.warn(
-        "ALLOWED_ORIGIN is unset; CORS responses use Access-Control-Allow-Origin: *",
+        "ALLOWED_ORIGIN is unset; CORS responses fall back to Access-Control-Allow-Origin: http://localhost:5173",
       );
       corsWildcardWarned = true;
     }
-    return "*";
+    return "http://localhost:5173";
   }
 
   return allowedOrigin;

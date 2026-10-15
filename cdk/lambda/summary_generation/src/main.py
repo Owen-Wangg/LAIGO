@@ -64,7 +64,7 @@ DISCLAIMER = "\n\n---\n**DISCLAIMER:**\nTHIS SUMMARY MUST NOT BE PROVIDED TO THE
 def get_cors_origin(event):
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
     if not allowed_origin:
-        return "*"
+        return "http://localhost:5173"
     return allowed_origin
 
 

@@ -146,16 +146,24 @@ export class ApiGatewayStack extends cdk.Stack {
     // Initialize Lambda layers collection
     this.layerList = {};
 
+    // Local Vite dev-server origin used as the non-production CORS fallback.
+    // Production never reaches this fallback: the guard above throws when no
+    // origin is configured, so effectiveOrigin only resolves to localhost in
+    // non-production environments.
     const localDevOrigin = "http://localhost:5173";
+    const effectiveOrigin = allowedOrigin || localDevOrigin;
+
     const s3CorsAllowedOrigins = allowedOrigin
       ? isProd
         ? [allowedOrigin] // Production: only the real domain
         : [allowedOrigin, localDevOrigin] // Development: include localhost
-      : ["*"];
-    // Spread into each Lambda's environment when allowedOrigin is set
-    const corsEnv: { [key: string]: string } = allowedOrigin
-      ? { ALLOWED_ORIGIN: allowedOrigin }
-      : {};
+      : [localDevOrigin]; // Non-production fallback: local dev server only
+    // Spread into each Lambda's environment; always set so handlers never
+    // fall back to their own default. Resolves to the configured origin, or
+    // the local dev origin in non-production.
+    const corsEnv: { [key: string]: string } = {
+      ALLOWED_ORIGIN: effectiveOrigin,
+    };
 
     // Create Lambda layer for JWT verification (Node.js)
     const jwt = new lambda.LayerVersion(this, "aws-jwt-verify", {
@@ -406,9 +414,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // Load the OpenAPI specification and resolve the Access-Control-Allow-Origin
     // placeholder at synth time. The spec references ${CorsAllowedOrigin} in its
     // CORS response headers; substituting the concrete origin here keeps the
-    // deployed value in lockstep with the synthesized stack. Falls back to "*"
-    // when no origin is configured (non-production without a frontend origin).
-    const corsOriginValue = allowedOrigin || "*";
+    // deployed value in lockstep with the synthesized stack. Falls back to the
+    // local dev-server origin when no origin is configured (non-production
+    // without a frontend origin).
+    const corsOriginValue = effectiveOrigin;
     const specPath = "OpenAPI_Swagger_Definition.yaml";
     const resolvedSpec = fs
       .readFileSync(specPath, "utf8")

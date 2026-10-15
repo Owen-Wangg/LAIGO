@@ -342,13 +342,14 @@ def get_cors_origin(event):
     """
     Resolve the CORS origin based on the ALLOWED_ORIGIN env var.
     Mirrors the Node.js getOriginHeader() in cdk/lambda/handlers/utils/utils.js.
+    Falls back to the local Vite dev-server origin when ALLOWED_ORIGIN is unset.
 
     Returns:
         str: The value for the Access-Control-Allow-Origin response header.
     """
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
     if not allowed_origin:
-        return "*"
+        return "http://localhost:5173"
 
     return allowed_origin
 

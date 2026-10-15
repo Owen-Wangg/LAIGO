@@ -152,7 +152,7 @@ def s3_key_exists(bucket, key):
 def get_cors_origin(event):
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
     if not allowed_origin:
-        return "*"
+        return "http://localhost:5173"
     return allowed_origin
 
 
