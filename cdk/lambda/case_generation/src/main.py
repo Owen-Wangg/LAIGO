@@ -168,10 +168,12 @@ def connect_to_db():
             connection = None
 
     secret = get_secret(DB_SECRET_NAME)
-    # Require TLS and verify the server certificate and hostname against the
-    # system trust store (the RDS Proxy presents an ACM-issued certificate from
-    # a public Amazon CA).
-    conn_str = f"host={RDS_PROXY_ENDPOINT} dbname={secret['dbname']} user={secret['username']} password={secret['password']} port={secret['port']} sslmode=verify-full sslrootcert=system"
+    # Require TLS and verify the server certificate and hostname. The RDS Proxy
+    # presents a certificate from the public Amazon CA chain; point sslrootcert
+    # at the OS CA bundle (which contains the Amazon roots) rather than "system",
+    # which the psycopg binary wheel's bundled OpenSSL does not resolve to the
+    # container's trust store.
+    conn_str = f"host={RDS_PROXY_ENDPOINT} dbname={secret['dbname']} user={secret['username']} password={secret['password']} port={secret['port']} sslmode=verify-full sslrootcert=/etc/pki/tls/certs/ca-bundle.crt"
     try:
         connection = psycopg.connect(conn_str)
         logger.info("Connected to RDS via proxy")

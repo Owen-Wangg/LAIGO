@@ -119,11 +119,13 @@ def connect_to_db():
             'password': secret['password'],
             'host': RDS_PROXY_ENDPOINT,
             'port': secret['port'],
-            # Require TLS and verify the server certificate and hostname against
-            # the system trust store (the RDS Proxy presents an ACM-issued
-            # certificate from a public Amazon CA).
+            # Require TLS and verify the server certificate and hostname. The RDS
+            # Proxy presents a certificate from the public Amazon CA chain; point
+            # sslrootcert at the OS CA bundle (which contains the Amazon roots)
+            # rather than "system", which the psycopg binary wheel's bundled
+            # OpenSSL does not resolve to the container's trust store.
             'sslmode': 'verify-full',
-            'sslrootcert': 'system'
+            'sslrootcert': '/etc/pki/tls/certs/ca-bundle.crt'
         }
         # Build connection string for psycopg2
         conn_str = " ".join(f"{k}={v}" for k, v in params.items())
