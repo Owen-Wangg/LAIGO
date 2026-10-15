@@ -921,18 +921,6 @@ export class ApiGatewayStack extends cdk.Stack {
     // Grant access to specific database secret (Application User)
     db.secretPathUser.grantRead(cognitoRole);
 
-    // Grant permission to add users to an IAM group
-    cognitoRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["iam:AddUserToGroup"],
-        resources: [
-          `arn:aws:iam::${this.account}:user/*`,
-          `arn:aws:iam::${this.account}:group/*`,
-        ],
-      }),
-    );
-
     // Grant access to EC2 for Cognito Lambda triggers (VPC Lambda execution)
     cognitoRole.addToPolicy(
       new iam.PolicyStatement({
@@ -962,20 +950,15 @@ export class ApiGatewayStack extends cdk.Stack {
       }),
     );
 
-    // Policy to allow Cognito admin actions for user group management
-    const adminAddUserToGroupPolicy = new iam.Policy(
+    // Policy to allow the post-confirmation trigger to read Cognito user attributes
+    const adminGetUserPolicy = new iam.Policy(
       this,
-      `${id}-AdminAddUserToGroupPolicy`,
+      `${id}-CognitoAdminGetUserPolicy`,
       {
         statements: [
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
-            actions: [
-              "cognito-idp:AdminAddUserToGroup",
-              "cognito-idp:AdminRemoveUserFromGroup",
-              "cognito-idp:AdminGetUser",
-              "cognito-idp:AdminListGroupsForUser",
-            ],
+            actions: ["cognito-idp:AdminGetUser"],
             resources: [
               `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${this.userPool.userPoolId}`,
             ],
@@ -984,13 +967,16 @@ export class ApiGatewayStack extends cdk.Stack {
       },
     );
     // Attach the inline policy to the role
-    cognitoRole.attachInlinePolicy(adminAddUserToGroupPolicy);
+    cognitoRole.attachInlinePolicy(adminGetUserPolicy);
 
-    // Grant access to SSM parameters for allowed email domains
+    // Grant access to the specific SSM parameters the signup triggers read
     cognitoRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/*`],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/LAIGO/AllowedEmailDomains`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/LAIGO/SignupMode`,
+        ],
       }),
     );
 
