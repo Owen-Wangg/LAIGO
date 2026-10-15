@@ -2795,6 +2795,14 @@ export class ApiGatewayStack extends cdk.Stack {
 
     const snsAlarmAction = new cloudwatchActions.SnsAction(securityAlertsTopic);
 
+    // Allow the admin function to publish notifications about admin role
+    // changes to the security alerts topic, scoped to this topic only.
+    securityAlertsTopic.grantPublish(lambdaAdminFunction);
+    lambdaAdminFunction.addEnvironment(
+      "SECURITY_ALERTS_TOPIC_ARN",
+      securityAlertsTopic.topicArn,
+    );
+
     // WAF Blocked Requests Alarm (API Gateway)
     const wafApiBlockedSpikeAlarm = new cloudwatch.Alarm(this, `${id}-WafApiBlockedSpike`, {
       metric: new cloudwatch.Metric({

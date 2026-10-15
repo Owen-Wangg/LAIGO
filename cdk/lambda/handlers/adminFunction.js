@@ -62,6 +62,64 @@ const {
   PutParameterCommand,
 } = require("@aws-sdk/client-ssm");
 
+const { evaluateRoleChange } = require("./utils/roleChange");
+
+/**
+ * Publish a notification about a security-relevant administrative event to the
+ * security alerts topic so privileged changes are never silent.
+ *
+ * The topic ARN is read from SECURITY_ALERTS_TOPIC_ARN. When it is unset the
+ * call is skipped with a warning, and any publish failure is swallowed and
+ * logged — notifying must never break the underlying mutation it accompanies.
+ *
+ * @param {Object} entry
+ * @param {string} entry.action - machine-readable action name
+ * @param {string} [entry.actorId]
+ * @param {string} [entry.actorEmail]
+ * @param {string} [entry.subjectId]
+ * @param {string} [entry.subjectEmail]
+ * @param {Object} [entry.detail] - extra structured context
+ */
+async function notifySecurityEvent(entry) {
+  const topicArn = process.env.SECURITY_ALERTS_TOPIC_ARN;
+  if (!topicArn) {
+    logger.warn(
+      "SECURITY_ALERTS_TOPIC_ARN not set, skipping security notification",
+      { action: entry?.action },
+    );
+    return;
+  }
+
+  try {
+    const { SNSClient, PublishCommand } = await import("@aws-sdk/client-sns");
+    const sns = new SNSClient();
+    await sns.send(
+      new PublishCommand({
+        TopicArn: topicArn,
+        Subject: `Admin role change: ${entry.action}`,
+        Message: JSON.stringify(
+          {
+            action: entry.action,
+            actorId: entry.actorId ?? null,
+            actorEmail: entry.actorEmail ?? null,
+            subjectId: entry.subjectId ?? null,
+            subjectEmail: entry.subjectEmail ?? null,
+            detail: entry.detail ?? null,
+            at: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      }),
+    );
+  } catch (err) {
+    logger.error("Failed to publish security notification", {
+      action: entry?.action,
+      errorMessage: err?.message,
+    });
+  }
+}
+
 let {
   MESSAGE_LIMIT,
   FILE_SIZE_LIMIT,
@@ -453,21 +511,6 @@ const routes = {
         return;
       }
 
-      const validRoles = ["admin", "instructor", "student"];
-      const validOperations = ["add", "remove"];
-
-      if (!validRoles.includes(role)) {
-        response.statusCode = 400;
-        response.body = JSON.stringify({ error: "Invalid role" });
-        return;
-      }
-
-      if (!validOperations.includes(operation)) {
-        response.statusCode = 400;
-        response.body = JSON.stringify({ error: "Invalid operation. Use 'add' or 'remove'" });
-        return;
-      }
-
       const existingUser = await sqlConnection`
             SELECT user_id, roles FROM "users" WHERE user_email = ${userEmail};
           `;
@@ -481,6 +524,27 @@ const routes = {
       const userIdToUpdate = existingUser[0].user_id;
       const currentRoles = existingUser[0].roles || [];
 
+      // Count current admins so the guard can protect the last remaining one.
+      const adminCountResult = await sqlConnection`
+            SELECT COUNT(*)::int AS count FROM "users" WHERE 'admin' = ANY(roles);
+          `;
+      const totalAdminCount = adminCountResult[0]?.count ?? 0;
+
+      const decision = evaluateRoleChange({
+        currentRoles,
+        operation,
+        role,
+        actorUserId: env.user_id,
+        targetUserId: userIdToUpdate,
+        totalAdminCount,
+      });
+
+      if (!decision.allowed) {
+        response.statusCode = decision.statusCode;
+        response.body = JSON.stringify({ error: decision.error });
+        return;
+      }
+
       if (operation === "add") {
         // Append role only if not already present
         if (!currentRoles.includes(role)) {
@@ -491,22 +555,6 @@ const routes = {
               `;
         }
       } else {
-        // Remove role only if present
-        if (!currentRoles.includes(role)) {
-          response.statusCode = 400;
-          response.body = JSON.stringify({ error: "User does not have this role" });
-          return;
-        }
-
-        // Prevent empty role set
-        if (currentRoles.length === 1) {
-          response.statusCode = 400;
-          response.body = JSON.stringify({
-            error: "Cannot remove the user's only role",
-          });
-          return;
-        }
-
         await sqlConnection`
               UPDATE "users"
               SET roles = array_remove(roles, ${role}::user_role)
@@ -522,12 +570,7 @@ const routes = {
         }
       }
 
-      const rolesAfter =
-        operation === "add"
-          ? currentRoles.includes(role)
-            ? currentRoles
-            : [...currentRoles, role]
-          : currentRoles.filter((r) => r !== role);
+      const rolesAfter = decision.rolesAfter;
 
       await recordAudit(sqlConnection, {
         actorId: env.user_id,
@@ -539,6 +582,19 @@ const routes = {
         before: { roles: currentRoles },
         after: { roles: rolesAfter },
       });
+
+      // Surface changes to admin access on the security channel so a grant or
+      // removal of the admin role is never silent.
+      if (role === "admin") {
+        await notifySecurityEvent({
+          action: "user_role.update",
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          subjectId: userIdToUpdate,
+          subjectEmail: userEmail,
+          detail: { operation, role, rolesAfter },
+        });
+      }
 
       response.statusCode = 200;
       response.body = JSON.stringify({
@@ -2208,11 +2264,21 @@ exports.handler = async (event, context) => {
       response.statusCode = 404;
       response.body = JSON.stringify({ error: "Route not found" });
     }
+
+    logger.info("Admin Response", {
+      route: pathData,
+      actorId: userId,
+      statusCode: response.statusCode,
+    });
   } catch (error) {
     response.statusCode = 500;
     logger.error("Handler error", error);
     response.body = JSON.stringify({ error: "Internal server error" });
+    logger.info("Admin Response", {
+      route: event.httpMethod + " " + event.resource,
+      actorId: userId,
+      statusCode: response.statusCode,
+    });
   }
-  logger.info("Admin Response", { statusCode: response.statusCode });
   return response;
 };

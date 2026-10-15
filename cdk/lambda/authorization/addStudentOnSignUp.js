@@ -74,6 +74,43 @@ class UserError extends Error {
 }
 
 /**
+ * Record a durable row in audit_log for an admin role granted during signup.
+ *
+ * Covers the two paths that provision an admin without an interactive admin
+ * action: the first-user bootstrap and a whitelist-derived admin role. The
+ * acting principal is the system (signup trigger), the subject is the new user.
+ * Failures are swallowed and logged so an audit write can never block the
+ * post-confirmation flow.
+ *
+ * @param {Object} entry
+ * @param {string} entry.action - machine-readable action name
+ * @param {string} entry.subjectEmail - email of the newly provisioned user
+ * @param {*} [entry.after] - resulting state (serialized to jsonb)
+ */
+async function recordSignupAudit(entry) {
+  if (!sqlConnection) return;
+  try {
+    const after =
+      entry.after === undefined || entry.after === null
+        ? null
+        : JSON.stringify(entry.after);
+
+    await sqlConnection`
+      INSERT INTO audit_log (
+        actor_email, action, subject_type, subject_email, after_state
+      ) VALUES (
+        ${"system:signup"}, ${entry.action}, ${"user"}, ${entry.subjectEmail ?? null}, ${after}::jsonb
+      );
+    `;
+  } catch (err) {
+    logger.error("Failed to write signup audit record", {
+      action: entry?.action,
+      errorMessage: err?.message,
+    });
+  }
+}
+
+/**
  * Cognito Post-Confirmation Lambda Trigger
  * Creates or updates user records in RDS database after email verification
  * Database is the single source of truth for user roles and metadata
@@ -237,6 +274,11 @@ exports.handler = async (event) => {
       if (isFirstUser) {
         defaultRole = "admin";
         logger.info("First user in system, assigning admin role");
+        await recordSignupAudit({
+          action: "user_role.bootstrap_admin",
+          subjectEmail: normalizedEmail,
+          after: { roles: ["admin"] },
+        });
       } else {
         // Check signup mode to determine role. Any inability to determine the
         // mode or the whitelist role resolves to the least-privileged role so
@@ -250,6 +292,13 @@ exports.handler = async (event) => {
           if (whitelistRole) {
             defaultRole = whitelistRole;
             logger.info("Assigning role from whitelist", { defaultRole });
+            if (defaultRole === "admin") {
+              await recordSignupAudit({
+                action: "user_role.signup_whitelist_admin",
+                subjectEmail: normalizedEmail,
+                after: { roles: ["admin"] },
+              });
+            }
           } else {
             // Whitelist check in preSignup should have blocked this; default to
             // the least-privileged role if the role cannot be determined here.
