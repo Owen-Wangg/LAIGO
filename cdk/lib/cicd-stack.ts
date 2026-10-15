@@ -126,7 +126,7 @@ export class CICDStack extends cdk.Stack {
       const repoName = `${id.toLowerCase()}-${lambda.name.toLowerCase()}`;
       const ecrRepo = new ecr.Repository(this, `${lambda.name}Repo`, {
         repositoryName: repoName,
-        imageTagMutability: ecr.TagMutability.MUTABLE, // Allow overwriting image tags
+        imageTagMutability: ecr.TagMutability.IMMUTABLE, // Prevent overwriting pushed image tags
         removalPolicy: cdk.RemovalPolicy.RETAIN, // Keep repository when stack is deleted
         imageScanOnPush: true, // Enable vulnerability scanning
       });
@@ -181,6 +181,8 @@ export class CICDStack extends cdk.Stack {
               value: "github-personal-access-token:my-github-token", // GitHub access token
             },
             PATH_FILTER: { value: lambda.sourceDir }, // Directory to monitor for changes
+            BLOCKING_SEVERITIES: { value: "CRITICAL HIGH" }, // Finding severities that block deployment
+            SCAN_TIMEOUT_SECONDS: { value: "300" }, // Max time to wait for scan completion
           },
           // Build specification defining the build process
           buildSpec: codebuild.BuildSpec.fromObject({
@@ -232,40 +234,89 @@ export class CICDStack extends cdk.Stack {
               },
               post_build: {
                 commands: [
-                  // Tag image with both specific version and latest
-                  "docker tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:latest",
-                  // Push both tags to ECR
+                  // Push the immutable, commit-scoped tag only
                   "docker push $REPOSITORY_URI:$IMAGE_TAG",
-                  "docker push $REPOSITORY_URI:latest",
-                  // Wait for ECR vulnerability scan
-                  'echo "Waiting for vulnerability scan to complete..."',
-                  "sleep 30",
-                  'echo "Checking vulnerability scan results..."',
-                  // Combine the vulnerability check into a single command using bash script
+                  // Fail-closed vulnerability gate: wait for the scan to complete,
+                  // then block on any configured severity. Any CLI error, scan
+                  // failure, or timeout stops the deployment.
                   `bash -c '
-                    SCAN_RESULTS=$(aws ecr describe-image-scan-findings \
-                      --repository-name $REPO_NAME \
-                      --image-id imageTag=latest \
-                      --query "imageScanFindingsSummary.findingCounts.CRITICAL" \
-                      --output text 2>/dev/null || echo "0")
-                    
-                    if [[ "$SCAN_RESULTS" != "0" && "$SCAN_RESULTS" != "None" ]]; then
-                      echo "CRITICAL vulnerabilities found: $SCAN_RESULTS. Blocking deployment."
-                      exit 1
-                    else
-                      echo "No critical vulnerabilities found. Proceeding with deployment."
-                    fi
+                    set -euo pipefail
+                    echo "Waiting for vulnerability scan to complete (timeout: $SCAN_TIMEOUT_SECONDS s)..."
+                    INTERVAL=10
+                    ELAPSED=0
+                    STATUS=""
+                    while true; do
+                      STATUS=$(aws ecr describe-image-scan-findings \
+                        --repository-name $REPO_NAME \
+                        --image-id imageTag=$IMAGE_TAG \
+                        --query "imageScanStatus.status" \
+                        --output text)
+                      echo "Scan status: $STATUS"
+                      if [ "$STATUS" = "COMPLETE" ]; then
+                        break
+                      fi
+                      if [ "$STATUS" = "FAILED" ]; then
+                        echo "Vulnerability scan FAILED. Blocking deployment."
+                        exit 1
+                      fi
+                      if [ "$ELAPSED" -ge "$SCAN_TIMEOUT_SECONDS" ]; then
+                        echo "Timed out waiting for scan to complete (last status: $STATUS). Blocking deployment."
+                        exit 1
+                      fi
+                      sleep $INTERVAL
+                      ELAPSED=$((ELAPSED + INTERVAL))
+                    done
+                    for SEV in $BLOCKING_SEVERITIES; do
+                      COUNT=$(aws ecr describe-image-scan-findings \
+                        --repository-name $REPO_NAME \
+                        --image-id imageTag=$IMAGE_TAG \
+                        --query "imageScanFindingsSummary.findingCounts.$SEV" \
+                        --output text)
+                      if [ "$COUNT" = "None" ]; then
+                        COUNT=0
+                      fi
+                      echo "Severity $SEV findings: $COUNT"
+                      if [ "$COUNT" -gt 0 ]; then
+                        echo "$SEV vulnerabilities found: $COUNT. Blocking deployment."
+                        exit 1
+                      fi
+                    done
+                    echo "No blocking vulnerabilities found. Proceeding with deployment."
                   '`,
-                  'echo "Checking if Lambda function exists before updating..."',
-                  // Combine the Lambda update into a single command
+                  // Resolve the exact digest of the scanned image so the deployed
+                  // artifact is pinned to the one that passed the gate.
                   `bash -c '
+                    set -euo pipefail
+                    IMAGE_DIGEST=$(aws ecr describe-images \
+                      --repository-name $REPO_NAME \
+                      --image-ids imageTag=$IMAGE_TAG \
+                      --query "imageDetails[0].imageDigest" \
+                      --output text)
+                    if [ -z "$IMAGE_DIGEST" ] || [ "$IMAGE_DIGEST" = "None" ]; then
+                      echo "Could not resolve image digest. Blocking deployment."
+                      exit 1
+                    fi
+                    echo "Resolved image digest: $IMAGE_DIGEST"
+                    echo "Checking if Lambda function exists before updating..."
                     if aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME &>/dev/null; then
-                      echo "Updating Lambda function to use the new image..."
+                      echo "Updating Lambda function to use the scanned image digest..."
                       aws lambda update-function-code \
                         --function-name $LAMBDA_FUNCTION_NAME \
-                        --image-uri $REPOSITORY_URI:latest
+                        --image-uri $REPOSITORY_URI@$IMAGE_DIGEST
                     else
                       echo "Lambda function $LAMBDA_FUNCTION_NAME does not exist yet. Skipping update."
+                    fi
+                  '`,
+                  // Seed a one-time bootstrap tag used only for CDK cold-create.
+                  // Never overwrite an existing bootstrap tag (immutable-safe).
+                  `bash -c '
+                    set -euo pipefail
+                    if aws ecr describe-images --repository-name $REPO_NAME --image-ids imageTag=bootstrap &>/dev/null; then
+                      echo "Bootstrap tag already present. Skipping seed."
+                    else
+                      echo "Seeding bootstrap tag..."
+                      docker tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:bootstrap
+                      docker push $REPOSITORY_URI:bootstrap
                     fi
                   '`,
                 ],

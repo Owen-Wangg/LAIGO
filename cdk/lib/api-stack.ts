@@ -1818,7 +1818,7 @@ export class ApiGatewayStack extends cdk.Stack {
         code: lambda.DockerImageCode.fromEcr(
           props.ecrRepositories["textGeneration"],
           {
-            tagOrDigest: "latest", // or whatever tag you're using
+            tagOrDigest: "bootstrap", // Cold-create only; pipeline pins the digest per run
           },
         ),
         memorySize: 1024,
@@ -1900,7 +1900,7 @@ export class ApiGatewayStack extends cdk.Stack {
         code: lambda.DockerImageCode.fromEcr(
           props.ecrRepositories["playgroundGeneration"],
           {
-            tagOrDigest: "latest",
+            tagOrDigest: "bootstrap", // Cold-create only; pipeline pins the digest per run
           },
         ),
         memorySize: 1024,
