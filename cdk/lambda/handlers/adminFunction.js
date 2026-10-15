@@ -63,6 +63,10 @@ const {
 } = require("@aws-sdk/client-ssm");
 
 const { evaluateRoleChange } = require("./utils/roleChange");
+const {
+  validateMessageLimit,
+  validateFileSizeLimit,
+} = require("./utils/configLimits");
 
 /**
  * Publish a notification about a security-relevant administrative event to the
@@ -1064,6 +1068,24 @@ const routes = {
         return;
       }
 
+      if (body.message_limit !== undefined) {
+        const messageLimitCheck = validateMessageLimit(body.message_limit);
+        if (!messageLimitCheck.valid) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: messageLimitCheck.error });
+          return;
+        }
+      }
+
+      if (body.file_size_limit !== undefined) {
+        const fileSizeLimitCheck = validateFileSizeLimit(body.file_size_limit);
+        if (!fileSizeLimitCheck.valid) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: fileSizeLimitCheck.error });
+          return;
+        }
+      }
+
       const promises = [];
       if (body.bedrock_llm_id) {
         promises.push(
@@ -1257,11 +1279,18 @@ const routes = {
       const body = parseBody(event.body);
       const newValue = body?.value;
 
-      if (!newValue) {
+      if (newValue === undefined || newValue === null) {
         response.statusCode = 400;
         response.body = JSON.stringify({
           error: "Missing 'value' in request body",
         });
+        return;
+      }
+
+      const fileSizeLimitCheck = validateFileSizeLimit(newValue);
+      if (!fileSizeLimitCheck.valid) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({ error: fileSizeLimitCheck.error });
         return;
       }
 
@@ -1784,15 +1813,10 @@ const routes = {
           return;
         }
 
-        // Validation: Must be "Infinity" or a number >= 10
-        const isInfinity = limit === "Infinity";
-        const numLimit = parseInt(limit);
-        if (!isInfinity && (isNaN(numLimit) || numLimit < 10)) {
+        const messageLimitCheck = validateMessageLimit(limit);
+        if (!messageLimitCheck.valid) {
           response.statusCode = 400;
-          response.body = JSON.stringify({
-            error:
-              "Limit must be 'Infinity' or a number greater than or equal to 10",
-          });
+          response.body = JSON.stringify({ error: messageLimitCheck.error });
           return;
         }
 
