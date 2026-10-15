@@ -23,7 +23,7 @@ from helpers.chat import (
     retrieve_dynamodb_history,
     generate_full_case_summary,
 )
-from helpers.usage import check_and_increment_usage
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 from aws_lambda_powertools import Logger, Metrics
 
 # Set up logging and metrics for the Lambda function
@@ -260,12 +260,16 @@ def send_to_websocket(connection_id, endpoint, request_id, msg_type, content=Non
         logger.error(f"Error sending to WebSocket: {e}")
 
 
-def _error_response(status_code, message, is_websocket=False, connection_id=None, ws_endpoint=None, request_id=None, event=None):
+def _error_response(status_code, message, is_websocket=False, connection_id=None, ws_endpoint=None, request_id=None, event=None, code=None):
     """Helper for generating error responses for both HTTP and WebSocket modes."""
     if is_websocket and connection_id:
-        send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=message)
+        ws_data = {"code": code} if code else None
+        send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=message, data=ws_data)
         return {"statusCode": status_code}
-    return create_response(status_code, {"error": message}, event)
+    body = {"error": message}
+    if code:
+        body["code"] = code
+    return create_response(status_code, body, event)
 
 
 def _require_non_empty_summary(body: str) -> str:
@@ -663,6 +667,16 @@ def handler(event, context):
     if not check_authorization(user_id, case_id):
         logger.error(f"Authorization failed: User {user_id} does not own case {case_id}")
         return _error_response(403, "Forbidden: You do not own this case", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+
+    # Require the user to have accepted the legal/AI-use waiver before any
+    # AI feature runs. Fails closed if the acceptance state cannot be read.
+    try:
+        conn = connect_to_db()
+        if not is_disclaimer_accepted(conn, user_id):
+            return _error_response(403, "You must accept the disclaimer before using the AI assistant.", is_websocket, connection_id, ws_endpoint, request_id, event=event, code="DISCLAIMER_NOT_ACCEPTED")
+    except Exception as e:
+        logger.error(f"Error checking disclaimer acceptance: {e}")
+        return _error_response(503, "Service temporarily unavailable. Please try again later.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
 
     case_title, case_type, jurisdiction, case_description = get_case_details(case_id)
     if case_title is None or case_type is None or jurisdiction is None or case_description is None:

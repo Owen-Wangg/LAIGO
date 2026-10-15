@@ -52,3 +52,35 @@ def check_and_increment_usage(connection, user_id):
         if connection:
             connection.rollback()
         raise
+
+
+def is_disclaimer_accepted(connection, user_id):
+    """
+    Returns whether the user has accepted the current legal/AI-use waiver.
+
+    Reads users.accepted_disclaimer with a parameterized query. Raises on a
+    missing connection, a missing user, or any query error so callers can
+    fail closed rather than silently allowing access.
+    """
+    if connection is None:
+        logger.error("Database connection is None")
+        raise ValueError("Database connection failed")
+
+    try:
+        cur = connection.cursor()
+        cur.execute(
+            'SELECT accepted_disclaimer FROM "users" WHERE user_id = %s',
+            (user_id,),
+        )
+        result = cur.fetchone()
+        cur.close()
+
+        if not result:
+            logger.error(f"User not found: {user_id}")
+            raise ValueError(f"User not found: {user_id}")
+
+        return bool(result[0])
+
+    except Exception as e:
+        logger.error(f"Error checking disclaimer acceptance: {e}")
+        raise

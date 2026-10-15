@@ -9,7 +9,7 @@ from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
 
 from helpers.chat import get_bedrock_llm, generate_case_title
-from helpers.usage import check_and_increment_usage
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 
 # Set up logging and metrics for the Lambda function
 logger = Logger(service="CaseGeneration")
@@ -316,6 +316,16 @@ def handler(event, context):
                 event,
                 field_errors=field_errors,
             )
+
+        # Require the user to have accepted the legal/AI-use waiver before any
+        # AI feature runs. Fails closed if the acceptance state cannot be read.
+        try:
+            conn = connect_to_db()
+            if not is_disclaimer_accepted(conn, user_id):
+                return create_response(403, {'error': 'You must accept the disclaimer before using the AI assistant.', 'code': 'DISCLAIMER_NOT_ACCEPTED'}, event)
+        except Exception as e:
+            logger.error(f"Error checking disclaimer acceptance: {e}")
+            return create_response(503, {'error': 'Service temporarily unavailable. Please try again later.'}, event)
 
         # Enforce the daily message limit before invoking Bedrock. Counts as one
         # message per request and fails closed if the usage check cannot complete.

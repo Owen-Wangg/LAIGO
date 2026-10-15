@@ -8,7 +8,7 @@ from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
 
-from helpers.usage import check_and_increment_usage
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 
 # Set up logging and metrics for the Lambda function
 logger = Logger(service="AssessProgress")
@@ -946,6 +946,24 @@ def handler(event, context):
     CONVERSATION HISTORY PACKAGE:
     {assessment_context["formatted_context"]}
     """
+
+    # Require the user to have accepted the legal/AI-use waiver before any
+    # AI feature runs. Fails closed if the acceptance state cannot be read.
+    try:
+        conn = connect_to_db()
+        if not is_disclaimer_accepted(conn, user_id):
+            error_msg = "You must accept the disclaimer before using the AI assistant."
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg, data={"code": "DISCLAIMER_NOT_ACCEPTED"})
+                return {"statusCode": 200}
+            return create_response(403, {"error": error_msg, "code": "DISCLAIMER_NOT_ACCEPTED"}, event)
+    except Exception as e:
+        logger.error(f"Error checking disclaimer acceptance: {e}")
+        error_msg = "Service temporarily unavailable. Please try again later."
+        if is_websocket and connection_id:
+            send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+            return {"statusCode": 503}
+        return create_response(503, {"error": error_msg}, event)
 
     # Enforce the daily message limit before invoking Bedrock. Counts as one
     # message per request and fails closed if the usage check cannot complete.

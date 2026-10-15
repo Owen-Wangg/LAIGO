@@ -8,7 +8,7 @@ from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
 
 from helpers.chat import get_bedrock_llm, get_initial_student_query, get_response, get_streaming_response
-from helpers.usage import check_and_increment_usage
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
  
 # Set up logging and metrics for the Lambda function
 logger = Logger(service="TextGeneration")
@@ -521,6 +521,42 @@ def handler(event, context):
                  return {"statusCode": 403, "body": "Forbidden"}
             else:
                  return create_response(403, {"error": "Forbidden: Only advocates can send messages for their own cases."}, event)
+
+
+        # Require the user to have accepted the legal/AI-use waiver before any
+        # AI feature runs. Fails closed if the acceptance state cannot be read.
+        try:
+            conn = connect_to_db()
+            if not is_disclaimer_accepted(conn, user_id):
+                error_message = "You must accept the disclaimer before using the AI assistant."
+                if is_websocket and connection_id:
+                    websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
+                    if not websocket_endpoint:
+                        websocket_endpoint = f"https://{domain_name}/{stage}"
+                    apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
+                    apigw_client.post_to_connection(
+                        ConnectionId=connection_id,
+                        Data=json.dumps({"type": "error", "requestId": request_id, "code": "DISCLAIMER_NOT_ACCEPTED", "content": error_message}).encode('utf-8')
+                    )
+                    return {"statusCode": 200}
+                return create_response(403, {"error": error_message, "code": "DISCLAIMER_NOT_ACCEPTED"}, event)
+        except Exception as e:
+            logger.error(f"Error checking disclaimer acceptance: {e}")
+            error_message = "Service temporarily unavailable. Please try again later."
+            if is_websocket and connection_id:
+                try:
+                    websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
+                    if not websocket_endpoint:
+                        websocket_endpoint = f"https://{domain_name}/{stage}"
+                    apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
+                    apigw_client.post_to_connection(
+                        ConnectionId=connection_id,
+                        Data=json.dumps({"type": "error", "requestId": request_id, "content": error_message}).encode('utf-8')
+                    )
+                except Exception as ws_error:
+                    logger.error(f"Failed to send disclaimer error to WebSocket: {ws_error}")
+                return {"statusCode": 503}
+            return create_response(503, {"error": error_message}, event)
 
 
         # Check Message Limit
