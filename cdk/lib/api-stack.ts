@@ -566,6 +566,57 @@ export class ApiGatewayStack extends cdk.Stack {
             metricName: "PerUserRateLimit",
           },
         },
+        {
+          // SQL injection protection for request parameters, body, and headers
+          name: "AWS-AWSManagedRulesSQLiRuleSet",
+          priority: 4,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesSQLiRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesSQLiRuleSet",
+          },
+        },
+        {
+          // Blocks request patterns known to be invalid or associated with exploits
+          name: "AWS-AWSManagedRulesKnownBadInputsRuleSet",
+          priority: 5,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesKnownBadInputsRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesKnownBadInputsRuleSet",
+          },
+        },
+        {
+          // Blocks sources on the Amazon threat-intelligence IP reputation list
+          name: "AWS-AWSManagedRulesAmazonIpReputationList",
+          priority: 6,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesAmazonIpReputationList",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesAmazonIpReputationList",
+          },
+        },
       ],
       customResponseBodies: {
         "rate-limited": {
