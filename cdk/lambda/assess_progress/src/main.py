@@ -607,8 +607,7 @@ def fetch_chat_history(session_id, table_name=None):
 
 def check_authorization(user_id, case_id):
     """
-    Verify that the user (identified by database user_id) owns the specified case 
-    or is an instructor for the case owner.
+    Verify that the user (identified by database user_id) owns the specified case.
     Prevents IDOR attacks by checking case ownership.
     
     Args:
@@ -626,19 +625,13 @@ def check_authorization(user_id, case_id):
         conn = connect_to_db()
         # Use context manager for automatic cursor cleanup
         with conn.cursor() as cursor:
-            # Single query to check both ownership and instructor relationship
+            # Assessment mutates case state, so only the case owner may proceed.
             query = """
                 SELECT 1 FROM "cases" c
                 WHERE c.case_id = %s
-                AND (
-                    c.student_id = %s
-                    OR EXISTS (
-                        SELECT 1 FROM instructor_students 
-                        WHERE instructor_id = %s AND student_id = c.student_id
-                    )
-                );
+                AND c.student_id = %s;
             """
-            cursor.execute(query, (case_id, user_id, user_id))
+            cursor.execute(query, (case_id, user_id))
             is_authorized = cursor.fetchone() is not None
             
             if is_authorized:
