@@ -182,10 +182,12 @@ export class DatabaseStack extends Stack {
       assumedBy: new iam.ServicePrincipal("rds.amazonaws.com"),
     });
 
-    // Grant permission for RDS Proxy to connect to databases
+    // Grant permission for RDS Proxy to connect to this database instance only
     rdsProxyRole.addToPolicy(
       new iam.PolicyStatement({
-        resources: ["*"],
+        resources: [
+          `arn:${this.partition}:rds-db:${this.region}:${this.account}:dbuser:${this.dbInstance.instanceResourceId}/*`,
+        ],
         actions: ["rds-db:connect"], // Allow database connections
       }),
     );
