@@ -2759,7 +2759,12 @@ export class ApiGatewayStack extends cdk.Stack {
         actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
         resources: [
           bedrockLogGroup.logGroupArn,
-          `${bedrockLogGroup.logGroupArn}:log-stream:*`,
+          cdk.Stack.of(this).formatArn({
+            service: "logs",
+            resource: "log-group",
+            resourceName: `${bedrockLogGroup.logGroupName}:log-stream:*`,
+            arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+          }),
         ],
       }),
     );
