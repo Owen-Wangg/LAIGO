@@ -87,6 +87,24 @@ const Login = () => {
     return message.replace(/^\w+ failed with error\s+/, "");
   };
 
+  // Maps sign-in errors to user-facing messages. Unknown-account and
+  // wrong-password outcomes are collapsed into a single generic message so the
+  // response is uniform regardless of whether the account exists; actionable,
+  // non-revealing states keep their specific guidance.
+  const signInErrorMessage = (err: Error) => {
+    switch (err.name) {
+      case "UserNotFoundException":
+      case "NotAuthorizedException":
+        return "Incorrect email or password.";
+      case "UserNotConfirmedException":
+        return "Please confirm your account before signing in.";
+      case "PasswordResetRequiredException":
+        return "A password reset is required before you can sign in.";
+      default:
+        return cleanErrorMessage(err.message) || "Something went wrong";
+    }
+  };
+
   const validateSignUpForm = () => {
     const errors: {
       firstName?: string;
@@ -171,7 +189,9 @@ const Login = () => {
     } catch (err) {
       setSnackbar({
         open: true,
-        message: cleanErrorMessage((err as Error).message) || "Something went wrong",
+        message: isSignUp
+          ? cleanErrorMessage((err as Error).message) || "Something went wrong"
+          : signInErrorMessage(err as Error),
         severity: "error",
       });
     } finally {
@@ -230,6 +250,17 @@ const Login = () => {
         setStep("requestReset");
       }
     } catch (err) {
+      // Mirror the success path for an unknown email so the reset flow does not
+      // reveal whether an account exists for the address.
+      if ((err as Error).name === "UserNotFoundException") {
+        setSnackbar({
+          open: true,
+          message: "Check your email for the confirmation code.",
+          severity: "success",
+        });
+        setStep("confirmReset");
+        return;
+      }
       setSnackbar({
         open: true,
         message: cleanErrorMessage((err as Error).message),

@@ -115,6 +115,12 @@ describe("ApiGatewayStack production hardening", () => {
       Value: "whitelist",
     });
   });
+
+  test("the user pool client returns uniform user-existence responses", () => {
+    template.hasResourceProperties("AWS::Cognito::UserPoolClient", {
+      PreventUserExistenceErrors: "ENABLED",
+    });
+  });
 });
 
 describe("ApiGatewayStack production guardrails", () => {

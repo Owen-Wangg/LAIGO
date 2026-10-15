@@ -346,6 +346,7 @@ export class ApiGatewayStack extends cdk.Stack {
       idTokenValidity: cdk.Duration.minutes(30),
       refreshTokenValidity: cdk.Duration.days(7), // Reduced from 30-day default; limits stolen refresh token window (AUTH-TL-01)
       enableTokenRevocation: true, // Explicit: ensures refresh token rotation and reuse detection (AUTH-TL-08)
+      preventUserExistenceErrors: true, // Return uniform authentication responses regardless of whether the account exists
     });
 
     // Create Cognito identity pool for AWS credential federation
