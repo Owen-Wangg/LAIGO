@@ -306,14 +306,12 @@ def get_case_details(case_id):
         """, (case_id,))
 
         result = cur.fetchone()
-        logger.info(f"Query result: {result}")
 
         cur.close()
  
         if result:
             case_title, case_type, jurisdiction, case_description, province, statute = result
-            logger.info(f"Case details found for case_id {case_id}: "
-                        f"Title: {case_title} \n Case type: {case_type} \n Jurisdiction: {jurisdiction} \n Case description: {case_description}, Province: {province}, Statute: {statute}")
+            logger.info(f"Case details found for case_id {case_id}")
             return case_title, case_type, jurisdiction, case_description, province, statute
         else:
             logger.warning(f"No details found for case_id {case_id}")
@@ -358,6 +356,35 @@ def handler(event, context):
     
     if not case_id:
         return create_response(400, "Missing required parameters: case_id", event)
+
+    # Unified Identity Extraction
+    # Prefer explicit payload userId (used by websocket invocations),
+    # then fall back to HTTP API authorizer context.
+    user_id = event.get("userId")
+    if not user_id:
+        user_id = request_context.get("authorizer", {}).get("userId")
+
+    # Unified Authorization Check — must run before any case content is loaded,
+    # logged, or sent to Bedrock so callers cannot probe cases they do not own.
+    if not user_id:
+        logger.error("Authorization failed: Missing user identity")
+        if is_websocket:
+            return {"statusCode": 401, "body": "Unauthorized"}
+        else:
+            return create_response(
+                401,
+                {"error": "Unauthorized: Missing user identity"},
+                event,
+            )
+
+    if not check_authorization(user_id, case_id):
+        logger.error(
+            f"Authorization failed: User {user_id} is not permitted to send messages for case {case_id}"
+        )
+        if is_websocket:
+            return {"statusCode": 403, "body": "Forbidden"}
+        else:
+            return create_response(403, {"error": "Forbidden: Only advocates can send messages for their own cases."}, event)
 
     system_prompt = get_system_prompt(block_type)
     if system_prompt is None:
@@ -493,35 +520,6 @@ def handler(event, context):
 
     try:
         logger.info("Generating response from the LLM.")
-                
-        # Unified Identity Extraction
-        # Prefer explicit payload userId (used by websocket invocations),
-        # then fall back to HTTP API authorizer context.
-        user_id = event.get("userId")
-        if not user_id:
-            user_id = request_context.get("authorizer", {}).get("userId")
-
-        # Unified Authorization Check
-        if not user_id:
-            logger.error("Authorization failed: Missing user identity")
-            if is_websocket:
-                 return {"statusCode": 401, "body": "Unauthorized"}
-            else:
-                 return create_response(
-                     401,
-                     {"error": "Unauthorized: Missing user identity"},
-                     event,
-                 )
-
-        if not check_authorization(user_id, case_id):
-            logger.error(
-                f"Authorization failed: User {user_id} is not permitted to send messages for case {case_id}"
-            )
-            if is_websocket:
-                 return {"statusCode": 403, "body": "Forbidden"}
-            else:
-                 return create_response(403, {"error": "Forbidden: Only advocates can send messages for their own cases."}, event)
-
 
         # Require the user to have accepted the legal/AI-use waiver before any
         # AI feature runs. Fails closed if the acceptance state cannot be read.
