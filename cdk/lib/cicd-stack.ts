@@ -196,7 +196,7 @@ export class CICDStack extends cdk.Stack {
                   // Create script to check if build is needed based on file changes
                   'echo "#!/bin/bash" > check_and_build.sh',
                   'echo "set -e" >> check_and_build.sh',
-                  'echo "git clone https://$GITHUB_TOKEN@github.com/$GITHUB_USERNAME/$GITHUB_REPO.git repo" >> check_and_build.sh',
+                  "echo 'git clone https://$GITHUB_TOKEN@github.com/$GITHUB_USERNAME/$GITHUB_REPO.git repo' >> check_and_build.sh",
                   'echo "cd repo" >> check_and_build.sh',
                   'echo "git fetch origin" >> check_and_build.sh',
                   'echo "git checkout $CODEBUILD_RESOLVED_SOURCE_VERSION" >> check_and_build.sh',
