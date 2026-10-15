@@ -7,6 +7,7 @@ const {
   getSqlConnection,
 } = require("./utils/utils");
 const { PERMISSION_MODELS, authorizeCaseAccess, authorizeObjectAccess } = require("./utils/authorization");
+const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "StudentFunction" });
 let { MESSAGE_LIMIT, FILE_SIZE_LIMIT, TABLE_NAME } = process.env;
@@ -1260,6 +1261,31 @@ const routes = {
           response.statusCode = authResult.code === "NOT_FOUND" ? 404 : 403;
           response.body = JSON.stringify({ error: authResult.reason });
           return;
+        }
+
+        // Validate reviewers against the caller's roster before any writes:
+        // each requested reviewer must be an instructor assigned to this
+        // student via instructor_students.
+        if (reviewer_ids.length > 0) {
+          const validReviewers = await sqlConnection`
+                SELECT u.user_id
+                FROM "users" u
+                JOIN "instructor_students" i ON i.instructor_id = u.user_id
+                WHERE i.student_id = ${user_id}
+                  AND u.user_id = ANY(${reviewer_ids})
+                  AND 'instructor' = ANY(u.roles);
+              `;
+
+          const assignmentCheck = validateReviewerAssignment({
+            requestedReviewerIds: reviewer_ids,
+            validReviewerIds: validReviewers.map((row) => row.user_id),
+          });
+
+          if (!assignmentCheck.allowed) {
+            response.statusCode = assignmentCheck.statusCode;
+            response.body = JSON.stringify({ error: assignmentCheck.error });
+            return;
+          }
         }
 
         await sqlConnection.begin(async (sql) => {
