@@ -564,7 +564,12 @@ def publish_notification_event(event_type, case_id, user_id, success=True, error
             notification_type = "summary_complete"
         else:
             title = "Summary Generation Failed"
-            message = f"Summary generation failed for {block_name}: {error_message or 'Unknown error'}"
+            # Keep raw exception text out of user-facing notifications; it can
+            # leak schema, SQL fragments, model IDs, ARNs and host details. The
+            # detailed error is recorded server-side for diagnosis instead.
+            if error_message:
+                logger.error(f"Summary generation failure detail for case {case_id}: {error_message}")
+            message = f"Summary generation failed for {block_name}. Please try again later or contact an administrator."
             notification_type = "summary_complete"
 
         event_detail = {
@@ -578,7 +583,6 @@ def publish_notification_event(event_type, case_id, user_id, success=True, error
                 "status": "success" if success else "failed",
                 "eventType": event_type,
                 "blockName": block_name,
-                **({"errorMessage": error_message} if error_message else {})
             }
         }
 

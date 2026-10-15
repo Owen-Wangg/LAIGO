@@ -187,13 +187,32 @@ const Login = () => {
         }
       }
     } catch (err) {
-      setSnackbar({
-        open: true,
-        message: isSignUp
-          ? cleanErrorMessage((err as Error).message) || "Something went wrong"
-          : signInErrorMessage(err as Error),
-        severity: "error",
-      });
+      const error = err as Error;
+      if (isSignUp) {
+        // Do not reveal whether an account already exists. Mirror the success
+        // path for an existing email so sign-up looks identical whether or not
+        // the address is already registered.
+        if (error.name === "UsernameExistsException") {
+          setSnackbar({
+            open: true,
+            message: "Sign up successful. Check your email to confirm.",
+            severity: "success",
+          });
+          setIsConfirmingSignUp(true);
+        } else {
+          setSnackbar({
+            open: true,
+            message: cleanErrorMessage(error.message) || "Something went wrong",
+            severity: "error",
+          });
+        }
+      } else {
+        setSnackbar({
+          open: true,
+          message: signInErrorMessage(error),
+          severity: "error",
+        });
+      }
     } finally {
       setLoading(false);
     }

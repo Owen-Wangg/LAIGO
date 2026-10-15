@@ -1248,6 +1248,20 @@ const routes = {
         logger.warn("Failed to parse body for reviewer_ids", e);
       }
 
+      // De-duplicate and bound the reviewer list before any work. The loop
+      // below runs a set of queries and emits one notification per element, so
+      // an unbounded or repeated list would amplify database load and flood a
+      // reviewer with notifications even when every id is a valid instructor.
+      const MAX_REVIEWERS = 50;
+      reviewer_ids = [...new Set(reviewer_ids)];
+      if (reviewer_ids.length > MAX_REVIEWERS) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({
+          error: `Too many reviewers (maximum ${MAX_REVIEWERS})`,
+        });
+        return;
+      }
+
       try {
         // BOLA: Check if user owns this case
         const authResult = await authorizeCaseAccess(

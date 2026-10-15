@@ -526,52 +526,70 @@ const routes = {
       }
 
       const userIdToUpdate = existingUser[0].user_id;
-      const currentRoles = existingUser[0].roles || [];
 
-      // Count current admins so the guard can protect the last remaining one.
-      const adminCountResult = await sqlConnection`
-            SELECT COUNT(*)::int AS count FROM "users" WHERE 'admin' = ANY(roles);
-          `;
-      const totalAdminCount = adminCountResult[0]?.count ?? 0;
+      // Run the admin-count check and the role update in a single transaction,
+      // locking the target row and every admin row, so the admin count cannot
+      // change between the decision and the write. This closes the race where
+      // two concurrent removals could each see a safe count and together drop
+      // the last administrator.
+      let decision;
+      let currentRoles = [];
+      const applied = await sqlConnection.begin(async (sql) => {
+        const lockedUser = await sql`
+              SELECT roles FROM "users" WHERE user_id = ${userIdToUpdate} FOR UPDATE;
+            `;
+        currentRoles = lockedUser[0]?.roles || [];
 
-      const decision = evaluateRoleChange({
-        currentRoles,
-        operation,
-        role,
-        actorUserId: env.user_id,
-        targetUserId: userIdToUpdate,
-        totalAdminCount,
+        const adminRows = await sql`
+              SELECT user_id FROM "users" WHERE 'admin' = ANY(roles) FOR UPDATE;
+            `;
+        const totalAdminCount = adminRows.length;
+
+        decision = evaluateRoleChange({
+          currentRoles,
+          operation,
+          role,
+          actorUserId: env.user_id,
+          targetUserId: userIdToUpdate,
+          totalAdminCount,
+        });
+
+        if (!decision.allowed) {
+          return false;
+        }
+
+        if (operation === "add") {
+          // Append role only if not already present
+          if (!currentRoles.includes(role)) {
+            await sql`
+                  UPDATE "users"
+                  SET roles = array_append(roles, ${role}::user_role)
+                  WHERE user_id = ${userIdToUpdate};
+                `;
+          }
+        } else {
+          await sql`
+                UPDATE "users"
+                SET roles = array_remove(roles, ${role}::user_role)
+                WHERE user_id = ${userIdToUpdate};
+              `;
+
+          // Clean up instructor assignments when instructor role is removed
+          if (role === "instructor") {
+            await sql`
+                  DELETE FROM "instructor_students"
+                  WHERE instructor_id = ${userIdToUpdate};
+                `;
+          }
+        }
+
+        return true;
       });
 
-      if (!decision.allowed) {
+      if (!applied) {
         response.statusCode = decision.statusCode;
         response.body = JSON.stringify({ error: decision.error });
         return;
-      }
-
-      if (operation === "add") {
-        // Append role only if not already present
-        if (!currentRoles.includes(role)) {
-          await sqlConnection`
-                UPDATE "users"
-                SET roles = array_append(roles, ${role}::user_role)
-                WHERE user_id = ${userIdToUpdate};
-              `;
-        }
-      } else {
-        await sqlConnection`
-              UPDATE "users"
-              SET roles = array_remove(roles, ${role}::user_role)
-              WHERE user_id = ${userIdToUpdate};
-            `;
-
-        // Clean up instructor assignments when instructor role is removed
-        if (role === "instructor") {
-          await sqlConnection`
-                DELETE FROM "instructor_students"
-                WHERE instructor_id = ${userIdToUpdate};
-              `;
-        }
       }
 
       const rolesAfter = decision.rolesAfter;
