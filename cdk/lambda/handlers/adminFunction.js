@@ -534,7 +534,7 @@ const routes = {
       // the last administrator.
       let decision;
       let currentRoles = [];
-      const applied = await sqlConnection.begin(async (sql) => {
+      await sqlConnection.begin(async (sql) => {
         const lockedUser = await sql`
               SELECT roles FROM "users" WHERE user_id = ${userIdToUpdate} FOR UPDATE;
             `;
@@ -554,8 +554,10 @@ const routes = {
           totalAdminCount,
         });
 
+        // Not permitted: make no changes and let the transaction commit the
+        // read-only locks. The response is derived from `decision` below.
         if (!decision.allowed) {
-          return false;
+          return;
         }
 
         if (operation === "add") {
@@ -582,11 +584,9 @@ const routes = {
                 `;
           }
         }
-
-        return true;
       });
 
-      if (!applied) {
+      if (!decision.allowed) {
         response.statusCode = decision.statusCode;
         response.body = JSON.stringify({ error: decision.error });
         return;
