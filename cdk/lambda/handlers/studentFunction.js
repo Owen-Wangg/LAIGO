@@ -8,6 +8,7 @@ const {
 } = require("./utils/utils");
 const { PERMISSION_MODELS, authorizeCaseAccess, authorizeObjectAccess } = require("./utils/authorization");
 const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
+const { validateCaseStatusEdit } = require("./utils/caseStatusTransition");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "StudentFunction" });
 let { MESSAGE_LIMIT, FILE_SIZE_LIMIT, TABLE_NAME } = process.env;
@@ -1141,7 +1142,7 @@ const routes = {
 
         const allowedCaseTypes = await getAllowedCaseTypes();
         const existingCaseRows = await sqlConnection`
-              SELECT case_type
+              SELECT case_type, status
               FROM "cases"
               WHERE case_id = ${case_id}
               LIMIT 1;
@@ -1159,13 +1160,22 @@ const routes = {
           return;
         }
 
+        const statusCheck = validateCaseStatusEdit({
+          currentStatus: existingCaseRows[0]?.status,
+          requestedStatus: status,
+        });
+        if (!statusCheck.allowed) {
+          response.statusCode = statusCheck.statusCode;
+          response.body = JSON.stringify({ error: statusCheck.error });
+          return;
+        }
+
         await sqlConnection`
               UPDATE "cases"
               SET 
                 case_title = ${case_title},
                 case_type = ${case_type},
                 case_description = ${case_description},
-                status = ${status},
                 jurisdiction = ${jurisdiction}, 
                 province = ${province},
                 statute = ${statute}
