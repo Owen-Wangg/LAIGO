@@ -246,11 +246,15 @@ export class CICDStack extends cdk.Stack {
                     ELAPSED=0
                     STATUS=""
                     while true; do
+                      # Right after a push ECR briefly returns ScanNotFoundException
+                      # before the scan is registered. Tolerate any describe error
+                      # here (treat as not-ready) and keep polling until COMPLETE,
+                      # FAILED, or the timeout below; do not let set -e abort.
                       STATUS=$(aws ecr describe-image-scan-findings \
                         --repository-name $REPO_NAME \
                         --image-id imageTag=$IMAGE_TAG \
                         --query "imageScanStatus.status" \
-                        --output text)
+                        --output text 2>/dev/null) || STATUS="PENDING"
                       echo "Scan status: $STATUS"
                       if [ "$STATUS" = "COMPLETE" ]; then
                         break
