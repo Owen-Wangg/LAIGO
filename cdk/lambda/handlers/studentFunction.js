@@ -19,6 +19,9 @@ const {
 
 const eventBridge = new EventBridgeClient({});
 
+const { SSMClient, GetParameterCommand } = require("@aws-sdk/client-ssm");
+const ssm = new SSMClient();
+
 let { CASE_TYPES_PARAM } = process.env;
 
 const DEFAULT_ALLOWED_CASE_TYPES = ["Other"];
@@ -50,8 +53,6 @@ const getAllowedCaseTypes = async () => {
   }
 
   try {
-    const { SSMClient, GetParameterCommand } = await import("@aws-sdk/client-ssm");
-    const ssm = new SSMClient();
     const result = await ssm.send(
       new GetParameterCommand({ Name: CASE_TYPES_PARAM }),
     );
@@ -184,10 +185,6 @@ const routes = {
   "GET /student/message_limit": async (event, env) => {
     const { response } = env;
     try {
-      const { SSMClient, GetParameterCommand } =
-        await import("@aws-sdk/client-ssm");
-
-      const ssm = new SSMClient();
       const result = await ssm.send(
         new GetParameterCommand({ Name: MESSAGE_LIMIT }),
       );
@@ -202,10 +199,6 @@ const routes = {
   "GET /student/file_size_limit": async (event, env) => {
     const { response } = env;
     try {
-      const { SSMClient, GetParameterCommand } =
-        await import("@aws-sdk/client-ssm");
-      const ssm = new SSMClient();
-
       const result = await ssm.send(
         new GetParameterCommand({ Name: FILE_SIZE_LIMIT }),
       );
