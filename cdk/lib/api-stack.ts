@@ -1794,6 +1794,20 @@ export class ApiGatewayStack extends cdk.Stack {
       ],
     });
 
+    // Per-function reserved concurrency ceilings for the compute- and Bedrock-
+    // intensive functions. Reserving a ceiling bounds how much of the account's
+    // shared concurrency pool any single function can consume, so a spike or
+    // runaway invocation on one cannot starve the others. Environment-aware;
+    // tune as real traffic patterns emerge.
+    const reservedConcurrency = {
+      textGen: isProd ? 50 : 10,
+      playground: isProd ? 30 : 5,
+      caseGen: isProd ? 25 : 5,
+      audioToText: isProd ? 25 : 5,
+      assessProgress: isProd ? 20 : 5,
+      summaryGeneration: isProd ? 20 : 5,
+    };
+
     const caseGenLambdaDockerFunc = new lambda.Function(
       this,
       `${id}-CaseLambdaDockerFunction`,
@@ -1804,6 +1818,7 @@ export class ApiGatewayStack extends cdk.Stack {
         layers: [psycopg3Layer, powertoolsLayer, bedrockClientLayer],
         memorySize: 512,
         timeout: cdk.Duration.seconds(30),
+        reservedConcurrentExecutions: reservedConcurrency.caseGen,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -1883,6 +1898,7 @@ export class ApiGatewayStack extends cdk.Stack {
         ),
         memorySize: 1024,
         timeout: cdk.Duration.seconds(120),
+        reservedConcurrentExecutions: reservedConcurrency.textGen,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -1965,6 +1981,7 @@ export class ApiGatewayStack extends cdk.Stack {
         ),
         memorySize: 1024,
         timeout: cdk.Duration.seconds(120),
+        reservedConcurrentExecutions: reservedConcurrency.playground,
         vpc: vpcStack.vpc,
         functionName: `${id}-PlaygroundTextGenLambdaDockerFunction`,
         tracing: lambda.Tracing.ACTIVE,
@@ -2043,6 +2060,7 @@ export class ApiGatewayStack extends cdk.Stack {
         functionName: `${id}-AssessProgressFunction`,
         timeout: Duration.seconds(30),
         memorySize: 1024,
+        reservedConcurrentExecutions: reservedConcurrency.assessProgress,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -2199,6 +2217,7 @@ export class ApiGatewayStack extends cdk.Stack {
         layers: [psycopg3Layer, powertoolsLayer],
         memorySize: 1024,
         timeout: cdk.Duration.seconds(120),
+        reservedConcurrentExecutions: reservedConcurrency.audioToText,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -2298,6 +2317,7 @@ export class ApiGatewayStack extends cdk.Stack {
         functionName: `${id}-SummaryGenerationFunction`,
         timeout: Duration.seconds(120),
         memorySize: 1024,
+        reservedConcurrentExecutions: reservedConcurrency.summaryGeneration,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
