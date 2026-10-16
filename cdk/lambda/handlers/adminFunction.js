@@ -2178,40 +2178,87 @@ const routes = {
         validItems,
       );
 
+      // BatchWriteItem signals partial success with HTTP 200 + UnprocessedItems
+      // (throttling / throughput pressure) rather than throwing. Resubmit those
+      // items with exponential backoff + jitter; if any remain after the
+      // retries, surface it to the caller instead of reporting success.
+      const MAX_BATCH_RETRIES = 8;
+      const sendBatchWithRetry = async (requests) => {
+        let unprocessed = { [tableName]: requests };
+        for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
+          const result = await dynamo.send(
+            new BatchWriteItemCommand({ RequestItems: unprocessed }),
+          );
+          const remaining = result.UnprocessedItems || {};
+          const remainingCount = (remaining[tableName] || []).length;
+          if (remainingCount === 0) return;
+          if (attempt === MAX_BATCH_RETRIES) {
+            throw new Error(
+              `BatchWriteItem left ${remainingCount} unprocessed item(s) after ${MAX_BATCH_RETRIES} retries`,
+            );
+          }
+          unprocessed = remaining;
+          const backoff = Math.min(1000, 2 ** attempt * 50);
+          const jitter = Math.floor(Math.random() * 50);
+          await new Promise((r) => setTimeout(r, backoff + jitter));
+        }
+      };
+
       // Write-first: upsert all new rows before pruning any stale ones. If a
       // batch fails mid-run the table still holds the old rows plus whatever
       // new rows landed — it is never left empty.
       let processed = 0;
-      for (let i = 0; i < toPut.length; i += CHUNK_SIZE) {
-        const chunk = toPut.slice(i, i + CHUNK_SIZE);
-        const putRequests = chunk.map((item) => ({
-          PutRequest: {
-            Item: {
-              email: { S: item.email },
-              canonical_role: { S: item.canonical_role },
-              uploaded_label: { S: item.uploaded_label },
+      try {
+        for (let i = 0; i < toPut.length; i += CHUNK_SIZE) {
+          const chunk = toPut.slice(i, i + CHUNK_SIZE);
+          const putRequests = chunk.map((item) => ({
+            PutRequest: {
+              Item: {
+                email: { S: item.email },
+                canonical_role: { S: item.canonical_role },
+                uploaded_label: { S: item.uploaded_label },
+              },
             },
-          },
-        }));
-        await dynamo.send(
-          new BatchWriteItemCommand({
-            RequestItems: { [tableName]: putRequests },
-          }),
-        );
-        processed += chunk.length;
-      }
+          }));
+          await sendBatchWithRetry(putRequests);
+          processed += chunk.length;
+        }
 
-      // Prune only the rows absent from the new set, after all puts succeeded.
-      for (let i = 0; i < toDelete.length; i += CHUNK_SIZE) {
-        const chunk = toDelete.slice(i, i + CHUNK_SIZE);
-        const deleteRequests = chunk.map((email) => ({
-          DeleteRequest: { Key: { email: { S: email } } },
-        }));
-        await dynamo.send(
-          new BatchWriteItemCommand({
-            RequestItems: { [tableName]: deleteRequests },
-          }),
+        // Prune only the rows absent from the new set, after all puts succeeded.
+        for (let i = 0; i < toDelete.length; i += CHUNK_SIZE) {
+          const chunk = toDelete.slice(i, i + CHUNK_SIZE);
+          const deleteRequests = chunk.map((email) => ({
+            DeleteRequest: { Key: { email: { S: email } } },
+          }));
+          await sendBatchWithRetry(deleteRequests);
+        }
+      } catch (batchError) {
+        // Partial application: do NOT delete the uploaded object or report
+        // success — a revoked entry may still be live in the table. Record the
+        // partial-failure state so an admin can reconcile.
+        console.error("Whitelist batch write incomplete:", batchError);
+        await recordAudit(env.sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "whitelist.replace.partial_failure",
+          subjectType: "signup_whitelist",
+          after: {
+            error: batchError.message,
+            processed,
+            toPut: toPut.length,
+            toDelete: toDelete.length,
+          },
+        }).catch((auditErr) =>
+          console.error("Failed to record partial-failure audit:", auditErr),
         );
+        response.statusCode = 502;
+        response.body = JSON.stringify({
+          error:
+            "Whitelist update only partially applied; table may be inconsistent. " +
+            "The uploaded file was retained for inspection.",
+          processed,
+        });
+        return;
       }
 
       // Clean up uploaded object after processing.

@@ -468,8 +468,9 @@ const CaseTranscriptions: React.FC = () => {
     y += 10;
 
     const tempDiv = document.createElement("div");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    tempDiv.innerHTML = await (marked.parse(audioText || "") as any);
+    tempDiv.innerHTML = DOMPurify.sanitize(
+      await (marked.parse(audioText || "") as Promise<string>),
+    );
     const content = tempDiv.textContent || tempDiv.innerText || "";
     const lines = doc.splitTextToSize(content, 180);
 
