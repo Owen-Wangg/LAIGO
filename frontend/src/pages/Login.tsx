@@ -21,6 +21,7 @@ import {
 } from "@mui/icons-material";
 import {
   signIn,
+  signOut,
   signUp,
   resetPassword,
   confirmResetPassword,
@@ -181,7 +182,21 @@ const Login = () => {
         });
         setIsConfirmingSignUp(true); // Set the step to confirmation after sign-up
       } else {
-        const user = await signIn({ username: email, password });
+        let user;
+        try {
+          user = await signIn({ username: email, password });
+        } catch (e) {
+          // A stale Cognito session can linger if a previous load failed before
+          // the app mounted (e.g. a backend error on /student/profile). In that
+          // case signIn throws UserAlreadyAuthenticatedException. Clear the stale
+          // session and retry so the user isn't stuck on the login screen.
+          if ((e as Error).name === "UserAlreadyAuthenticatedException") {
+            await signOut();
+            user = await signIn({ username: email, password });
+          } else {
+            throw e;
+          }
+        }
         if (user.isSignedIn) {
           window.location.reload();
         }
