@@ -275,6 +275,14 @@ export class VpcStack extends Stack {
         subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       });
 
+      // Add SSM endpoint for the private-with-egress subnets where the Lambdas
+      // run so Parameter Store calls stay on the AWS private network instead of
+      // traversing the NAT Gateway (removes NAT data-processing cost and latency).
+      this.vpc.addInterfaceEndpoint(`${id}-SSM Endpoint Private`, {
+        service: ec2.InterfaceVpcEndpointAwsService.SSM,
+        subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      });
+
       addGatewayEndpoints(this.vpc, id);
     }
   }
