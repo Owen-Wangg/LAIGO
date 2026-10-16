@@ -145,7 +145,7 @@ const CaseSummaries: React.FC = () => {
 
   // Set up WebSocket connection
   const { sendStreamingRequest, isConnected } = useWebSocket(wsUrl, {
-    protocols: token ? [token] : undefined,
+    protocols: token ? [token, "chat.v1"] : undefined,
   });
 
   // Initialize WebSocket URL when auth is available

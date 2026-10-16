@@ -105,7 +105,9 @@ export class AmplifyStack extends cdk.Stack {
         VITE_AWS_REGION: this.region,
         VITE_COGNITO_USER_POOL_ID: apiStack.getUserPoolId(),
         VITE_COGNITO_USER_POOL_CLIENT_ID: apiStack.getUserPoolClientId(),
-        VITE_API_ENDPOINT: apiStack.getEndpointUrl(),
+        // API Gateway's url ends with a trailing slash (".../prod/"); strip it
+        // so frontend calls build ".../prod/student/..." not ".../prod//student/...".
+        VITE_API_ENDPOINT: apiStack.getEndpointUrl().replace(/\/+$/, ""),
         VITE_IDENTITY_POOL_ID: apiStack.getIdentityPoolId(),
         VITE_WEBSOCKET_URL: apiStack.getWebSocketUrl(),
       },

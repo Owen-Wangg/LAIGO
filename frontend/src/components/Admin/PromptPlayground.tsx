@@ -1381,7 +1381,7 @@ const PromptPlayground: React.FC = () => {
   }, []);
 
   const { sendStreamingRequest, isConnected } = useWebSocket(wsUrl, {
-    protocols: token ? [token] : undefined,
+    protocols: token ? [token, "chat.v1"] : undefined,
   });
 
   // Fetch reasoning prompt versions when block type changes

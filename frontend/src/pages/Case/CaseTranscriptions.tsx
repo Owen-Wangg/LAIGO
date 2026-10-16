@@ -87,7 +87,7 @@ const CaseTranscriptions: React.FC = () => {
 
   // Set up WebSocket connection (same hook as CaseSummaries, InterviewAssistant, etc.)
   const { sendStreamingRequest, isConnected } = useWebSocket(wsUrl, {
-    protocols: token ? [token] : undefined,
+    protocols: token ? [token, "chat.v1"] : undefined,
   });
 
   // Initialize WebSocket URL when auth is available

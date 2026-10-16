@@ -235,7 +235,7 @@ const InterviewAssistant: React.FC = () => {
   // Initialize WebSocket connection
   const { sendStreamingRequest, isConnected } = useWebSocket(wsUrl, {
     onMessage: handleWebSocketMessage,
-    protocols: token ? [token] : undefined,
+    protocols: token ? [token, "chat.v1"] : undefined,
   });
 
   // Call assess_progress endpoint
