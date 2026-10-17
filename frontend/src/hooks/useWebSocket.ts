@@ -52,6 +52,16 @@ export const useWebSocket = (
   // Request tracking for streaming responses - must be after useState to maintain hook order
   const pendingRequestsRef = useRef<Map<string, PendingRequest>>(new Map());
 
+  // Static (non-token) subprotocols from the caller, e.g. ["chat.v1"]. The token
+  // is always protocols[0]; everything after it is an application subprotocol
+  // that must be offered on every (re)connection. We snapshot it here so a token
+  // refresh on reconnect can rebuild [freshToken, ...static] without ever
+  // dropping the app subprotocol (which the server echoes to complete the
+  // WebSocket handshake).
+  const staticSubprotocolsRef = useRef<string[]>(
+    Array.isArray(options.protocols) ? options.protocols.slice(1) : [],
+  );
+
   // Generate unique request ID
   const generateRequestId = () =>
     `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -60,6 +70,12 @@ export const useWebSocket = (
   const callbacksRef = useRef(options);
   useEffect(() => {
     callbacksRef.current = options;
+    // Keep the static subprotocol snapshot in sync whenever the caller provides
+    // a protocols array (i.e. once the token is available). Don't clobber it
+    // when protocols is temporarily undefined (e.g. before auth resolves).
+    if (Array.isArray(options.protocols)) {
+      staticSubprotocolsRef.current = options.protocols.slice(1);
+    }
   }, [options]);
 
   const clearTokenRotationTimer = useCallback(() => {
@@ -140,12 +156,14 @@ export const useWebSocket = (
           const freshToken = session.tokens?.idToken?.toString();
 
           if (freshToken) {
-            // Update protocols with fresh token
-            callbacksRef.current.protocols = Array.isArray(
-              callbacksRef.current.protocols,
-            )
-              ? [freshToken, ...callbacksRef.current.protocols.slice(1)]
-              : [freshToken];
+            // Rebuild protocols as [freshToken, ...static] so the application
+            // subprotocol (e.g. "chat.v1") is always offered again. Sourcing the
+            // static part from the ref — not from the possibly-stale current
+            // protocols — prevents it from being dropped across reconnects.
+            callbacksRef.current.protocols = [
+              freshToken,
+              ...staticSubprotocolsRef.current,
+            ];
           } else {
             setConnectionState("error");
             return; // Abort reconnection - user needs to re-authenticate
@@ -174,8 +192,19 @@ export const useWebSocket = (
     setConnectionState("connecting");
 
     try {
-      // Use protocols from the current options ref if available
-      const protocols = callbacksRef.current.protocols;
+      // Use protocols from the current options ref if available. Normalize so the
+      // static application subprotocols (e.g. "chat.v1") are always offered
+      // alongside the token — the server selects one of these to complete the
+      // handshake, and a connection that offers only the token can never succeed.
+      const rawProtocols = callbacksRef.current.protocols;
+      let protocols: string | string[] | undefined = rawProtocols;
+      if (rawProtocols) {
+        const list = Array.isArray(rawProtocols) ? rawProtocols : [rawProtocols];
+        const missingStatic = staticSubprotocolsRef.current.filter(
+          (p) => !list.includes(p),
+        );
+        protocols = [...list, ...missingStatic];
+      }
       wsRef.current = protocols
         ? new WebSocket(url, protocols)
         : new WebSocket(url);
