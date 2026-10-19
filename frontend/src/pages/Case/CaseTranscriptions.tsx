@@ -242,10 +242,23 @@ const CaseTranscriptions: React.FC = () => {
     return data;
   };
 
-  const uploadFile = async (file: File, presignedUrl: string) => {
+  // Maps the normalized file type (mp3/wav/m4a) to the exact MIME type the
+  // backend uses to sign the presigned URL. The Content-Type sent on the PUT
+  // must match the signed ContentType, otherwise S3 rejects it with a 403.
+  const NORMALIZED_TYPE_TO_MIME: Record<string, string> = {
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/m4a",
+  };
+
+  const uploadFile = async (
+    file: File,
+    presignedUrl: string,
+    contentType: string,
+  ) => {
     const response = await fetch(presignedUrl, {
       method: "PUT",
-      headers: { "Content-Type": file.type },
+      headers: { "Content-Type": contentType },
       body: file,
     });
     if (!response.ok) throw new Error("Upload failed");
@@ -257,6 +270,10 @@ const CaseTranscriptions: React.FC = () => {
 
     setIsUploading(true);
     setError(null);
+
+    // When true, the WebSocket callbacks own isUploading and the finally
+    // block must not reset it out from under an in-progress transcription.
+    let handedOffToCallbacks = false;
 
     try {
       const audioFileId = uuidv4();
@@ -270,8 +287,10 @@ const CaseTranscriptions: React.FC = () => {
         throw new Error("Failed to generate presigned URL");
       }
 
-      // Upload file to S3
-      await uploadFile(audioFile.file, presignedUrl);
+      // Upload file to S3 using the MIME type that matches the signed URL.
+      const uploadContentType =
+        NORMALIZED_TYPE_TO_MIME[audioFile.type] || audioFile.file.type;
+      await uploadFile(audioFile.file, presignedUrl, uploadContentType);
 
       // Trigger transcription via WebSocket (primary) or HTTP (fallback)
       if (isConnected) {
@@ -308,7 +327,9 @@ const CaseTranscriptions: React.FC = () => {
             },
           },
         );
-        // Don't set isUploading=false here; the callbacks handle it
+        // The callbacks own isUploading from here.
+        handedOffToCallbacks = true;
+        setAudioTitle("");
         return;
       }
 
@@ -341,8 +362,10 @@ const CaseTranscriptions: React.FC = () => {
     } catch (error: unknown) {
       setError((error as Error).message || "Failed to upload audio file");
     } finally {
-      setIsUploading(false);
-      setAudioTitle("");
+      if (!handedOffToCallbacks) {
+        setIsUploading(false);
+        setAudioTitle("");
+      }
     }
   };
 
