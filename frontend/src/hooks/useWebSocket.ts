@@ -38,6 +38,12 @@ export const useWebSocket = (
   const tokenRotationTimeoutRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const isManualDisconnectRef = useRef(false);
+  // Guards against overlapping async connect() calls creating duplicate sockets.
+  const isConnectingRef = useRef(false);
+  // Expiry (ms epoch) of the JWT used for the live connection, so the token
+  // rotation timer can schedule a refresh against the token actually in use
+  // rather than a stale one supplied by the component.
+  const currentTokenExpiryRef = useRef<number | null>(null);
   const [connectionState, setConnectionState] = useState<
     "connecting" | "connected" | "disconnected" | "error"
   >("disconnected");
@@ -125,7 +131,7 @@ export const useWebSocket = (
   }, []);
 
   // Ref to store connect function to avoid circular dependencies
-  const connectRef = useRef<() => void>(() => {});
+  const connectRef = useRef<() => void | Promise<void>>(() => {});
 
   const scheduleReconnect = useCallback(() => {
     if (isManualDisconnectRef.current) {
@@ -146,68 +152,86 @@ export const useWebSocket = (
       30000,
     );
 
-    reconnectTimeoutRef.current = window.setTimeout(async () => {
+    reconnectTimeoutRef.current = window.setTimeout(() => {
       reconnectAttemptsRef.current++;
-
-      // Refresh token before reconnecting
-      if (callbacksRef.current.protocols) {
-        try {
-          const session = await fetchAuthSession();
-          const freshToken = session.tokens?.idToken?.toString();
-
-          if (freshToken) {
-            // Rebuild protocols as [freshToken, ...static] so the application
-            // subprotocol (e.g. "chat.v1") is always offered again. Sourcing the
-            // static part from the ref — not from the possibly-stale current
-            // protocols — prevents it from being dropped across reconnects.
-            callbacksRef.current.protocols = [
-              freshToken,
-              ...staticSubprotocolsRef.current,
-            ];
-          } else {
-            setConnectionState("error");
-            return; // Abort reconnection - user needs to re-authenticate
-          }
-        } catch (error) {
-          setConnectionState("error");
-          return; // Abort reconnection - auth is broken
-        }
-      }
-
+      // connect() fetches a fresh JWT via fetchAuthSession() itself, so there is
+      // no token to refresh here — this avoids reconnecting with a stale token.
       if (connectRef.current) {
         connectRef.current();
       }
     }, delay);
   }, []);
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (
       !url ||
+      isConnectingRef.current ||
       wsRef.current?.readyState === WebSocket.CONNECTING ||
       wsRef.current?.readyState === WebSocket.OPEN
     ) {
       return;
     }
 
+    // Only authenticate the socket when the caller opted into token-based
+    // subprotocols (protocols provided). Non-authenticated usages connect plainly.
+    const usesAuth = callbacksRef.current.protocols !== undefined;
+
+    isConnectingRef.current = true;
     setConnectionState("connecting");
 
     try {
-      // Use protocols from the current options ref if available. Normalize so the
-      // static application subprotocols (e.g. "chat.v1") are always offered
-      // alongside the token — the server selects one of these to complete the
-      // handshake, and a connection that offers only the token can never succeed.
-      const rawProtocols = callbacksRef.current.protocols;
-      let protocols: string | string[] | undefined = rawProtocols;
-      if (rawProtocols) {
-        const list = Array.isArray(rawProtocols) ? rawProtocols : [rawProtocols];
-        const missingStatic = staticSubprotocolsRef.current.filter(
-          (p) => !list.includes(p),
-        );
-        protocols = [...list, ...missingStatic];
+      let protocols: string | string[] | undefined;
+
+      if (usesAuth) {
+        // Always fetch a FRESH token immediately before connecting. Amplify's
+        // fetchAuthSession() transparently refreshes an expired id token when a
+        // valid refresh token exists, so each (re)connect uses a currently-valid
+        // JWT instead of the stale one captured by the component at mount. This
+        // is what prevents the "Token expired" 403 reconnect storm.
+        let freshToken: string | undefined;
+        try {
+          const session = await fetchAuthSession();
+          freshToken = session.tokens?.idToken?.toString();
+        } catch {
+          freshToken = undefined;
+        }
+
+        const freshTokenExpiry = freshToken
+          ? parseJwtExpiryMs(freshToken)
+          : null;
+
+        // Stop instead of looping when there is no token, or when the token is
+        // already expired (e.g. the refresh token itself expired and Amplify
+        // returned a stale id token). Reconnecting with an expired JWT only
+        // produces repeated 403s at the authorizer — the user must re-auth.
+        if (!freshToken || (freshTokenExpiry !== null && freshTokenExpiry <= Date.now())) {
+          isConnectingRef.current = false;
+          setConnectionState("error");
+          return;
+        }
+
+        currentTokenExpiryRef.current = freshTokenExpiry;
+        // The token is always protocols[0]; the static application subprotocols
+        // (e.g. "chat.v1") must always be offered so the server can echo one and
+        // complete the handshake.
+        protocols = [freshToken, ...staticSubprotocolsRef.current];
       }
+
+      // Re-check guards after the await — the component may have unmounted or a
+      // socket may already be opening/open by now.
+      if (
+        isManualDisconnectRef.current ||
+        wsRef.current?.readyState === WebSocket.CONNECTING ||
+        wsRef.current?.readyState === WebSocket.OPEN
+      ) {
+        isConnectingRef.current = false;
+        return;
+      }
+
       wsRef.current = protocols
         ? new WebSocket(url, protocols)
         : new WebSocket(url);
+      isConnectingRef.current = false;
 
       wsRef.current.onopen = () => {
         setConnectionState("connected");
@@ -341,10 +365,11 @@ export const useWebSocket = (
         callbacksRef.current.onError?.(error);
       };
     } catch {
+      isConnectingRef.current = false;
       setConnectionState("error");
       scheduleReconnect();
     }
-  }, [url, startHeartbeat, stopHeartbeat, scheduleReconnect]);
+  }, [url, startHeartbeat, stopHeartbeat, scheduleReconnect, parseJwtExpiryMs]);
 
   // Update connectRef whenever connect changes
   useEffect(() => {
@@ -361,6 +386,7 @@ export const useWebSocket = (
 
     stopHeartbeat();
     clearTokenRotationTimer();
+    isConnectingRef.current = false;
 
     if (wsRef.current) {
       wsRef.current.close(1000, "Manual disconnect");
@@ -425,14 +451,9 @@ export const useWebSocket = (
       return;
     }
 
-    const protocols = callbacksRef.current.protocols;
-    const token = Array.isArray(protocols) ? protocols[0] : protocols;
-    if (!token || typeof token !== "string") {
-      clearTokenRotationTimer();
-      return;
-    }
-
-    const expiryMs = parseJwtExpiryMs(token);
+    // Use the expiry of the token actually used for the live connection, which
+    // connect() records after fetching a fresh JWT.
+    const expiryMs = currentTokenExpiryRef.current;
     if (!expiryMs) {
       clearTokenRotationTimer();
       return;
@@ -450,13 +471,7 @@ export const useWebSocket = (
     return () => {
       clearTokenRotationTimer();
     };
-  }, [
-    connectionState,
-    protocolsDeps,
-    forceReconnect,
-    clearTokenRotationTimer,
-    parseJwtExpiryMs,
-  ]);
+  }, [connectionState, protocolsDeps, forceReconnect, clearTokenRotationTimer]);
 
   useEffect(() => {
     let connectTimer: number | undefined;
