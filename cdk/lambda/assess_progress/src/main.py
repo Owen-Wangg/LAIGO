@@ -899,7 +899,49 @@ def handler(event, context):
         CONVERSATION HISTORY PACKAGE:
         {assessment_context["formatted_context"]}
         """
-        
+
+        # Require the user to have accepted the legal/AI-use waiver before any
+        # AI feature runs — playground assessments are not exempt. Fails closed
+        # if the acceptance state cannot be read.
+        try:
+            conn = connect_to_db()
+            if not is_disclaimer_accepted(conn, user_id):
+                error_msg = "You must accept the disclaimer before using the AI assistant."
+                if is_websocket and connection_id:
+                    send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg, data={"code": "DISCLAIMER_NOT_ACCEPTED"})
+                    return {"statusCode": 200}
+                return create_response(403, {"error": error_msg, "code": "DISCLAIMER_NOT_ACCEPTED"}, event)
+        except Exception as e:
+            logger.error(f"Error checking disclaimer acceptance: {e}")
+            error_msg = "Service temporarily unavailable. Please try again later."
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 503}
+            return create_response(503, {"error": error_msg}, event)
+
+        # Enforce the daily message limit before invoking Bedrock so playground
+        # requests are metered like standard-mode requests. Counts as one
+        # message per request and fails closed if the usage check cannot run.
+        if MESSAGE_LIMIT != "Infinity":
+            try:
+                limit = int(MESSAGE_LIMIT)
+                conn = connect_to_db()
+                current_usage = check_and_increment_usage(conn, user_id)
+                logger.info(f"User {user_id} playground usage: {current_usage}/{limit}")
+                if current_usage > limit:
+                    error_msg = "Daily message limit reached. Please contact your administrator."
+                    if is_websocket and connection_id:
+                        send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                        return {"statusCode": 200}
+                    return create_response(429, {"error": error_msg}, event)
+            except Exception as e:
+                logger.error(f"Error checking message limit: {e}")
+                error_msg = "Service temporarily unavailable. Please try again later."
+                if is_websocket and connection_id:
+                    send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                    return {"statusCode": 503}
+                return create_response(503, {"error": error_msg}, event)
+
         try:
             start_time = time.time()
             result, response_text = _invoke_assessment_with_retry(system_instructions, human_context, max_attempts=2)
