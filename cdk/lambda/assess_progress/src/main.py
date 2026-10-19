@@ -840,13 +840,33 @@ def handler(event, context):
                 return {"statusCode": 403}
             return create_response(403, error_msg, event)
 
+        # IDOR protection: resolve the authenticated caller's user_id and bind
+        # the playground session key to it. The staff-role check above only
+        # confirms the caller is an admin/instructor — without an ownership
+        # binding, the session key would be built entirely from client-supplied
+        # input, letting any staff user read another staff user's playground
+        # transcripts. user_id is sourced from the trusted boundary (the
+        # authorizer / WebSocket handler), never from the request body.
+        user_id = event.get("userId")
+        if not user_id:
+            user_id = request_context.get("authorizer", {}).get("principalId")
+        if not user_id:
+            logger.error("Authorization failed: Missing userId for playground assessment")
+            error_msg = "Unauthorized: Missing user identity"
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 401}
+            return create_response(401, error_msg, event)
+
         custom_prompt = body.get("custom_prompt", "")
         test_id = body.get("session_id", "")
         block_type = body.get("block_type", "intake")
         
-        # Construct unique session ID consistently with text_generation Lambda
-        # Pattern: playground-{test_id}-{block_type}
-        playground_session_id = f"playground-{test_id}-{block_type}"
+        # Construct unique session ID consistently with playground_generation
+        # Lambda. The user_id prefix namespaces the key per authenticated caller
+        # so staff users cannot read each other's playground sessions.
+        # Pattern: playground-{user_id}-{test_id}-{block_type}
+        playground_session_id = f"playground-{user_id}-{test_id}-{block_type}"
         
         logger.info(f"Playground assessment mode for block_type: {block_type}, test_id: {test_id}, session_id: {playground_session_id}")
         
