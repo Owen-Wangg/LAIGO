@@ -3,7 +3,6 @@ import json
 import boto3
 import logging
 import psycopg
-import functools
 from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
 
@@ -172,11 +171,17 @@ def connect_to_db():
         raise
     return connection
 
-@functools.lru_cache(maxsize=128)
 def check_authorization(user_id, case_id):
     """
     Verify that the user (identified by user_id) owns the specified case.
     Prevents sending messages on behalf of another user.
+
+    NOTE: This decision is intentionally NOT memoized. A previous
+    @functools.lru_cache had no TTL, so a revoked case assignment kept
+    returning an authorized result for the warm container's lifetime (and a
+    transient DB error cached a fail-closed False, locking out a legitimate
+    user). The ownership check is a single indexed query, so it is re-evaluated
+    on every request to stay consistent with the current DB state.
     
     Args:
         user_id: Database user ID from authorizer context
@@ -388,6 +393,88 @@ def handler(event, context):
         else:
             return create_response(403, {"error": "Forbidden: Only advocates can send messages for their own cases."}, event)
 
+    # Consent and daily-quota gates MUST run before any billed Bedrock call
+    # (including the apply_guardrail invocations below) so a user who has not
+    # accepted the AI-use waiver, or who is over the daily message limit, cannot
+    # incur guardrail spend or have content AI-processed. Both gates fail closed.
+    # (Note: the quota is now consumed even if a guardrail later blocks the
+    # request; metering the attempt is the intended tradeoff for this fix.)
+    try:
+        conn = connect_to_db()
+        if not is_disclaimer_accepted(conn, user_id):
+            error_message = "You must accept the disclaimer before using the AI assistant."
+            if is_websocket and connection_id:
+                websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
+                if not websocket_endpoint:
+                    websocket_endpoint = f"https://{domain_name}/{stage}"
+                apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
+                apigw_client.post_to_connection(
+                    ConnectionId=connection_id,
+                    Data=json.dumps({"type": "error", "requestId": request_id, "code": "DISCLAIMER_NOT_ACCEPTED", "content": error_message}).encode('utf-8')
+                )
+                return {"statusCode": 200}
+            return create_response(403, {"error": error_message, "code": "DISCLAIMER_NOT_ACCEPTED"}, event)
+    except Exception as e:
+        logger.error(f"Error checking disclaimer acceptance: {e}")
+        error_message = "Service temporarily unavailable. Please try again later."
+        if is_websocket and connection_id:
+            try:
+                websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
+                if not websocket_endpoint:
+                    websocket_endpoint = f"https://{domain_name}/{stage}"
+                apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
+                apigw_client.post_to_connection(
+                    ConnectionId=connection_id,
+                    Data=json.dumps({"type": "error", "requestId": request_id, "content": error_message}).encode('utf-8')
+                )
+            except Exception as ws_error:
+                logger.error(f"Failed to send disclaimer error to WebSocket: {ws_error}")
+            return {"statusCode": 503}
+        return create_response(503, {"error": error_message}, event)
+
+    # Check Message Limit
+    if MESSAGE_LIMIT != "Infinity":
+        try:
+            limit = int(MESSAGE_LIMIT)
+            conn = connect_to_db()
+            current_usage = check_and_increment_usage(conn, user_id)
+            logging.info(f"User {user_id} usage: {current_usage}/{limit}")
+
+            if current_usage > limit:
+                error_message = "Daily message limit reached. Please contact your administrator."
+                if is_websocket and connection_id:
+                    websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
+                    if not websocket_endpoint:
+                        websocket_endpoint = f"https://{domain_name}/{stage}"
+
+                    apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
+                    apigw_client.post_to_connection(
+                        ConnectionId=connection_id,
+                        Data=json.dumps({"type": "error", "requestId": request_id, "content": error_message}).encode('utf-8')
+                    )
+                    return {"statusCode": 200}
+                else:
+                     return create_response(429, {"error": error_message}, event)
+        except Exception as e:
+            logger.error(f"Error checking message limit: {e}")
+            # Fail closed: deny request if usage check fails (prevents bypass during DB outages)
+            error_message = "Service temporarily unavailable. Please try again later."
+            if is_websocket and connection_id:
+                try:
+                    websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
+                    if not websocket_endpoint:
+                        websocket_endpoint = f"https://{domain_name}/{stage}"
+                    apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
+                    apigw_client.post_to_connection(
+                        ConnectionId=connection_id,
+                        Data=json.dumps({"type": "error", "requestId": request_id, "content": error_message}).encode('utf-8')
+                    )
+                except Exception as ws_error:
+                    logger.error(f"Failed to send rate limit error to WebSocket: {ws_error}")
+                return {"statusCode": 503}
+            else:
+                return create_response(503, {"error": error_message}, event)
+
     system_prompt = get_system_prompt(block_type)
     if system_prompt is None:
         logger.error(f"Error fetching system prompt for block_type: {block_type}")
@@ -522,85 +609,6 @@ def handler(event, context):
 
     try:
         logger.info("Generating response from the LLM.")
-
-        # Require the user to have accepted the legal/AI-use waiver before any
-        # AI feature runs. Fails closed if the acceptance state cannot be read.
-        try:
-            conn = connect_to_db()
-            if not is_disclaimer_accepted(conn, user_id):
-                error_message = "You must accept the disclaimer before using the AI assistant."
-                if is_websocket and connection_id:
-                    websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
-                    if not websocket_endpoint:
-                        websocket_endpoint = f"https://{domain_name}/{stage}"
-                    apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
-                    apigw_client.post_to_connection(
-                        ConnectionId=connection_id,
-                        Data=json.dumps({"type": "error", "requestId": request_id, "code": "DISCLAIMER_NOT_ACCEPTED", "content": error_message}).encode('utf-8')
-                    )
-                    return {"statusCode": 200}
-                return create_response(403, {"error": error_message, "code": "DISCLAIMER_NOT_ACCEPTED"}, event)
-        except Exception as e:
-            logger.error(f"Error checking disclaimer acceptance: {e}")
-            error_message = "Service temporarily unavailable. Please try again later."
-            if is_websocket and connection_id:
-                try:
-                    websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
-                    if not websocket_endpoint:
-                        websocket_endpoint = f"https://{domain_name}/{stage}"
-                    apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
-                    apigw_client.post_to_connection(
-                        ConnectionId=connection_id,
-                        Data=json.dumps({"type": "error", "requestId": request_id, "content": error_message}).encode('utf-8')
-                    )
-                except Exception as ws_error:
-                    logger.error(f"Failed to send disclaimer error to WebSocket: {ws_error}")
-                return {"statusCode": 503}
-            return create_response(503, {"error": error_message}, event)
-
-
-        # Check Message Limit
-        if MESSAGE_LIMIT != "Infinity":
-            try:
-                limit = int(MESSAGE_LIMIT)
-                conn = connect_to_db()
-                current_usage = check_and_increment_usage(conn, user_id)
-                logging.info(f"User {user_id} usage: {current_usage}/{limit}")
-                    
-                if current_usage > limit:
-                    error_message = "Daily message limit reached. Please contact your administrator."
-                    if is_websocket and connection_id:
-                        websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
-                        if not websocket_endpoint:
-                            websocket_endpoint = f"https://{domain_name}/{stage}"
-
-                        apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
-                        apigw_client.post_to_connection(
-                            ConnectionId=connection_id,
-                            Data=json.dumps({"type": "error", "requestId": request_id, "content": error_message}).encode('utf-8')
-                        )
-                        return {"statusCode": 200}
-                    else:
-                         return create_response(429, {"error": error_message}, event)
-            except Exception as e:
-                logger.error(f"Error checking message limit: {e}")
-                # Fail closed: deny request if usage check fails (prevents bypass during DB outages)
-                error_message = "Service temporarily unavailable. Please try again later."
-                if is_websocket and connection_id:
-                    try:
-                        websocket_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT")
-                        if not websocket_endpoint:
-                            websocket_endpoint = f"https://{domain_name}/{stage}"
-                        apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
-                        apigw_client.post_to_connection(
-                            ConnectionId=connection_id,
-                            Data=json.dumps({"type": "error", "requestId": request_id, "content": error_message}).encode('utf-8')
-                        )
-                    except Exception as ws_error:
-                        logger.error(f"Failed to send rate limit error to WebSocket: {ws_error}")
-                    return {"statusCode": 503}
-                else:
-                    return create_response(503, {"error": error_message}, event)
 
         # Request Processing
         if is_websocket and connection_id:
