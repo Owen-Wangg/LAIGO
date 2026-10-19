@@ -98,7 +98,7 @@ components:
         type: token
         authorizerUri:
           Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${adminLambdaAuthorizer.Arn}/invocations
-        authorizerResultTtlInSeconds: 60
+        authorizerResultTtlInSeconds: 300
 
     instructorAuthorizer:
       type: apiKey
@@ -109,7 +109,7 @@ components:
         type: token
         authorizerUri:
           Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${instructorLambdaAuthorizer.Arn}/invocations
-        authorizerResultTtlInSeconds: 60
+        authorizerResultTtlInSeconds: 300
 
     studentAuthorizer:
       type: apiKey
@@ -120,7 +120,7 @@ components:
         type: token
         authorizerUri:
           Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${studentLambdaAuthorizer.Arn}/invocations
-        authorizerResultTtlInSeconds: 60
+        authorizerResultTtlInSeconds: 300
 
   responses:
     Success:
@@ -4469,11 +4469,6 @@ paths:
             type: string
         - in: query
           name: file_type
-          required: true
-          schema:
-            type: string
-        - in: query
-          name: cognito_token
           required: true
           schema:
             type: string

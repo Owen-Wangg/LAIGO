@@ -7,6 +7,8 @@ const {
   getSqlConnection,
 } = require("./utils/utils");
 const { PERMISSION_MODELS, authorizeCaseAccess, authorizeObjectAccess } = require("./utils/authorization");
+const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
+const { validateCaseStatusEdit } = require("./utils/caseStatusTransition");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "StudentFunction" });
 let { MESSAGE_LIMIT, FILE_SIZE_LIMIT, TABLE_NAME } = process.env;
@@ -16,6 +18,9 @@ const {
 } = require("@aws-sdk/client-eventbridge");
 
 const eventBridge = new EventBridgeClient({});
+
+const { SSMClient, GetParameterCommand } = require("@aws-sdk/client-ssm");
+const ssm = new SSMClient();
 
 let { CASE_TYPES_PARAM } = process.env;
 
@@ -48,8 +53,6 @@ const getAllowedCaseTypes = async () => {
   }
 
   try {
-    const { SSMClient, GetParameterCommand } = await import("@aws-sdk/client-ssm");
-    const ssm = new SSMClient();
     const result = await ssm.send(
       new GetParameterCommand({ Name: CASE_TYPES_PARAM }),
     );
@@ -182,10 +185,6 @@ const routes = {
   "GET /student/message_limit": async (event, env) => {
     const { response } = env;
     try {
-      const { SSMClient, GetParameterCommand } =
-        await import("@aws-sdk/client-ssm");
-
-      const ssm = new SSMClient();
       const result = await ssm.send(
         new GetParameterCommand({ Name: MESSAGE_LIMIT }),
       );
@@ -200,10 +199,6 @@ const routes = {
   "GET /student/file_size_limit": async (event, env) => {
     const { response } = env;
     try {
-      const { SSMClient, GetParameterCommand } =
-        await import("@aws-sdk/client-ssm");
-      const ssm = new SSMClient();
-
       const result = await ssm.send(
         new GetParameterCommand({ Name: FILE_SIZE_LIMIT }),
       );
@@ -1140,7 +1135,7 @@ const routes = {
 
         const allowedCaseTypes = await getAllowedCaseTypes();
         const existingCaseRows = await sqlConnection`
-              SELECT case_type
+              SELECT case_type, status
               FROM "cases"
               WHERE case_id = ${case_id}
               LIMIT 1;
@@ -1158,13 +1153,22 @@ const routes = {
           return;
         }
 
+        const statusCheck = validateCaseStatusEdit({
+          currentStatus: existingCaseRows[0]?.status,
+          requestedStatus: status,
+        });
+        if (!statusCheck.allowed) {
+          response.statusCode = statusCheck.statusCode;
+          response.body = JSON.stringify({ error: statusCheck.error });
+          return;
+        }
+
         await sqlConnection`
               UPDATE "cases"
               SET 
                 case_title = ${case_title},
                 case_type = ${case_type},
                 case_description = ${case_description},
-                status = ${status},
                 jurisdiction = ${jurisdiction}, 
                 province = ${province},
                 statute = ${statute}
@@ -1247,6 +1251,20 @@ const routes = {
         logger.warn("Failed to parse body for reviewer_ids", e);
       }
 
+      // De-duplicate and bound the reviewer list before any work. The loop
+      // below runs a set of queries and emits one notification per element, so
+      // an unbounded or repeated list would amplify database load and flood a
+      // reviewer with notifications even when every id is a valid instructor.
+      const MAX_REVIEWERS = 50;
+      reviewer_ids = [...new Set(reviewer_ids)];
+      if (reviewer_ids.length > MAX_REVIEWERS) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({
+          error: `Too many reviewers (maximum ${MAX_REVIEWERS})`,
+        });
+        return;
+      }
+
       try {
         // BOLA: Check if user owns this case
         const authResult = await authorizeCaseAccess(
@@ -1260,6 +1278,31 @@ const routes = {
           response.statusCode = authResult.code === "NOT_FOUND" ? 404 : 403;
           response.body = JSON.stringify({ error: authResult.reason });
           return;
+        }
+
+        // Validate reviewers against the caller's roster before any writes:
+        // each requested reviewer must be an instructor assigned to this
+        // student via instructor_students.
+        if (reviewer_ids.length > 0) {
+          const validReviewers = await sqlConnection`
+                SELECT u.user_id
+                FROM "users" u
+                JOIN "instructor_students" i ON i.instructor_id = u.user_id
+                WHERE i.student_id = ${user_id}
+                  AND u.user_id = ANY(${reviewer_ids})
+                  AND 'instructor' = ANY(u.roles);
+              `;
+
+          const assignmentCheck = validateReviewerAssignment({
+            requestedReviewerIds: reviewer_ids,
+            validReviewerIds: validReviewers.map((row) => row.user_id),
+          });
+
+          if (!assignmentCheck.allowed) {
+            response.statusCode = assignmentCheck.statusCode;
+            response.body = JSON.stringify({ error: assignmentCheck.error });
+            return;
+          }
         }
 
         await sqlConnection.begin(async (sql) => {

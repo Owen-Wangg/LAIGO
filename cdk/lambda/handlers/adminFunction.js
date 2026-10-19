@@ -5,14 +5,129 @@ const {
   handleError,
   getSqlConnection,
 } = require("./utils/utils");
+const {
+  isValidWhitelistKey,
+  parseWhitelistCsv,
+  computeWhitelistReconciliation,
+} = require("./utils/whitelistUpload");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "AdminFunction" });
+
+/**
+ * Persist a durable record of a security-critical administrative change.
+ *
+ * Writes one row to audit_log capturing the acting user, the affected subject,
+ * and the before/after state. Failures here are logged but never propagated:
+ * an audit write must not break the underlying mutation it accompanies.
+ *
+ * @param {Function} sqlConnection - postgres tagged-template connection
+ * @param {Object} entry
+ * @param {string} [entry.actorId] - acting user's id
+ * @param {string} [entry.actorEmail] - acting user's email
+ * @param {string} entry.action - machine-readable action name
+ * @param {string} [entry.subjectType] - type of the affected subject
+ * @param {string} [entry.subjectId] - id of the affected subject
+ * @param {string} [entry.subjectEmail] - email of the affected subject
+ * @param {*} [entry.before] - state before the change (serialized to jsonb)
+ * @param {*} [entry.after] - state after the change (serialized to jsonb)
+ */
+async function recordAudit(sqlConnection, entry) {
+  try {
+    const before =
+      entry.before === undefined || entry.before === null
+        ? null
+        : JSON.stringify(entry.before);
+    const after =
+      entry.after === undefined || entry.after === null
+        ? null
+        : JSON.stringify(entry.after);
+
+    await sqlConnection`
+      INSERT INTO audit_log (
+        actor_id, actor_email, action,
+        subject_type, subject_id, subject_email,
+        before_state, after_state
+      ) VALUES (
+        ${entry.actorId ?? null}, ${entry.actorEmail ?? null}, ${entry.action},
+        ${entry.subjectType ?? null}, ${entry.subjectId ?? null}, ${entry.subjectEmail ?? null},
+        ${before}::jsonb, ${after}::jsonb
+      );
+    `;
+  } catch (err) {
+    logger.error("Failed to write audit record", {
+      action: entry?.action,
+      errorMessage: err?.message,
+    });
+  }
+}
 
 const {
   SSMClient,
   GetParameterCommand,
   PutParameterCommand,
 } = require("@aws-sdk/client-ssm");
+
+const { evaluateRoleChange } = require("./utils/roleChange");
+const {
+  validateMessageLimit,
+  validateFileSizeLimit,
+} = require("./utils/configLimits");
+
+/**
+ * Publish a notification about a security-relevant administrative event to the
+ * security alerts topic so privileged changes are never silent.
+ *
+ * The topic ARN is read from SECURITY_ALERTS_TOPIC_ARN. When it is unset the
+ * call is skipped with a warning, and any publish failure is swallowed and
+ * logged — notifying must never break the underlying mutation it accompanies.
+ *
+ * @param {Object} entry
+ * @param {string} entry.action - machine-readable action name
+ * @param {string} [entry.actorId]
+ * @param {string} [entry.actorEmail]
+ * @param {string} [entry.subjectId]
+ * @param {string} [entry.subjectEmail]
+ * @param {Object} [entry.detail] - extra structured context
+ */
+async function notifySecurityEvent(entry) {
+  const topicArn = process.env.SECURITY_ALERTS_TOPIC_ARN;
+  if (!topicArn) {
+    logger.warn(
+      "SECURITY_ALERTS_TOPIC_ARN not set, skipping security notification",
+      { action: entry?.action },
+    );
+    return;
+  }
+
+  try {
+    const { SNSClient, PublishCommand } = await import("@aws-sdk/client-sns");
+    const sns = new SNSClient();
+    await sns.send(
+      new PublishCommand({
+        TopicArn: topicArn,
+        Subject: `Admin role change: ${entry.action}`,
+        Message: JSON.stringify(
+          {
+            action: entry.action,
+            actorId: entry.actorId ?? null,
+            actorEmail: entry.actorEmail ?? null,
+            subjectId: entry.subjectId ?? null,
+            subjectEmail: entry.subjectEmail ?? null,
+            detail: entry.detail ?? null,
+            at: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      }),
+    );
+  } catch (err) {
+    logger.error("Failed to publish security notification", {
+      action: entry?.action,
+      errorMessage: err?.message,
+    });
+  }
+}
 
 let {
   MESSAGE_LIMIT,
@@ -236,6 +351,16 @@ const routes = {
                 ON CONFLICT (instructor_id, student_id) DO NOTHING;
               `;
 
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "instructor_student.assign",
+          subjectType: "user",
+          subjectId: student.user_id,
+          subjectEmail: student_email,
+          after: { instructor_id, student_id: student.user_id },
+        });
+
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: "Instructor and student linked successfully.",
@@ -268,6 +393,15 @@ const routes = {
               DELETE FROM "instructor_students"
               WHERE instructor_id = ${instructor_id} AND student_id = ${student_id};
             `;
+
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "instructor_student.unassign",
+          subjectType: "user",
+          subjectId: student_id,
+          after: { instructor_id, student_id },
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -386,21 +520,6 @@ const routes = {
         return;
       }
 
-      const validRoles = ["admin", "instructor", "student"];
-      const validOperations = ["add", "remove"];
-
-      if (!validRoles.includes(role)) {
-        response.statusCode = 400;
-        response.body = JSON.stringify({ error: "Invalid role" });
-        return;
-      }
-
-      if (!validOperations.includes(operation)) {
-        response.statusCode = 400;
-        response.body = JSON.stringify({ error: "Invalid operation. Use 'add' or 'remove'" });
-        return;
-      }
-
       const existingUser = await sqlConnection`
             SELECT user_id, roles FROM "users" WHERE user_email = ${userEmail};
           `;
@@ -412,47 +531,96 @@ const routes = {
       }
 
       const userIdToUpdate = existingUser[0].user_id;
-      const currentRoles = existingUser[0].roles || [];
 
-      if (operation === "add") {
-        // Append role only if not already present
-        if (!currentRoles.includes(role)) {
-          await sqlConnection`
+      // Run the admin-count check and the role update in a single transaction,
+      // locking the target row and every admin row, so the admin count cannot
+      // change between the decision and the write. This closes the race where
+      // two concurrent removals could each see a safe count and together drop
+      // the last administrator.
+      let decision;
+      let currentRoles = [];
+      await sqlConnection.begin(async (sql) => {
+        const lockedUser = await sql`
+              SELECT roles FROM "users" WHERE user_id = ${userIdToUpdate} FOR UPDATE;
+            `;
+        currentRoles = lockedUser[0]?.roles || [];
+
+        const adminRows = await sql`
+              SELECT user_id FROM "users" WHERE 'admin' = ANY(roles) FOR UPDATE;
+            `;
+        const totalAdminCount = adminRows.length;
+
+        decision = evaluateRoleChange({
+          currentRoles,
+          operation,
+          role,
+          actorUserId: env.user_id,
+          targetUserId: userIdToUpdate,
+          totalAdminCount,
+        });
+
+        // Not permitted: make no changes and let the transaction commit the
+        // read-only locks. The response is derived from `decision` below.
+        if (!decision.allowed) {
+          return;
+        }
+
+        if (operation === "add") {
+          // Append role only if not already present
+          if (!currentRoles.includes(role)) {
+            await sql`
+                  UPDATE "users"
+                  SET roles = array_append(roles, ${role}::user_role)
+                  WHERE user_id = ${userIdToUpdate};
+                `;
+          }
+        } else {
+          await sql`
                 UPDATE "users"
-                SET roles = array_append(roles, ${role}::user_role)
+                SET roles = array_remove(roles, ${role}::user_role)
                 WHERE user_id = ${userIdToUpdate};
               `;
-        }
-      } else {
-        // Remove role only if present
-        if (!currentRoles.includes(role)) {
-          response.statusCode = 400;
-          response.body = JSON.stringify({ error: "User does not have this role" });
-          return;
-        }
 
-        // Prevent empty role set
-        if (currentRoles.length === 1) {
-          response.statusCode = 400;
-          response.body = JSON.stringify({
-            error: "Cannot remove the user's only role",
-          });
-          return;
+          // Clean up instructor assignments when instructor role is removed
+          if (role === "instructor") {
+            await sql`
+                  DELETE FROM "instructor_students"
+                  WHERE instructor_id = ${userIdToUpdate};
+                `;
+          }
         }
+      });
 
-        await sqlConnection`
-              UPDATE "users"
-              SET roles = array_remove(roles, ${role}::user_role)
-              WHERE user_id = ${userIdToUpdate};
-            `;
+      if (!decision.allowed) {
+        response.statusCode = decision.statusCode;
+        response.body = JSON.stringify({ error: decision.error });
+        return;
+      }
 
-        // Clean up instructor assignments when instructor role is removed
-        if (role === "instructor") {
-          await sqlConnection`
-                DELETE FROM "instructor_students"
-                WHERE instructor_id = ${userIdToUpdate};
-              `;
-        }
+      const rolesAfter = decision.rolesAfter;
+
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "user_role.update",
+        subjectType: "user",
+        subjectId: userIdToUpdate,
+        subjectEmail: userEmail,
+        before: { roles: currentRoles },
+        after: { roles: rolesAfter },
+      });
+
+      // Surface changes to admin access on the security channel so a grant or
+      // removal of the admin role is never silent.
+      if (role === "admin") {
+        await notifySecurityEvent({
+          action: "user_role.update",
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          subjectId: userIdToUpdate,
+          subjectEmail: userEmail,
+          detail: { operation, role, rolesAfter },
+        });
       }
 
       response.statusCode = 200;
@@ -472,11 +640,11 @@ const routes = {
 
       if (!event.body) throw new Error("Request body is missing");
 
-      const { category, block_type, prompt_text, version_name, author_id, prompt_scope } =
+      const { category, block_type, prompt_text, version_name, prompt_scope } =
         parseBody(event.body);
 
-      // Trust authenticated user identity when author_id is not provided by client.
-      const promptAuthorId = author_id || user_id;
+      // Authorship is derived from the authenticated caller, not the request body.
+      const promptAuthorId = user_id;
       const resolvedScope = prompt_scope || 'block';
 
       if (!category || !prompt_text)
@@ -515,6 +683,21 @@ const routes = {
             }, ${prompt_text}, ${promptAuthorId || null}, false)
             RETURNING *;
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.create",
+        subjectType: "prompt_version",
+        subjectId: insertPrompt[0].prompt_version_id,
+        after: {
+          category,
+          block_type: block_type || null,
+          prompt_scope: resolvedScope,
+          version_number: nextVersion,
+          version_name: version_name || null,
+        },
+      });
 
       response.body = JSON.stringify(insertPrompt[0]);
     } catch (err) {
@@ -718,6 +901,15 @@ const routes = {
             `;
       });
 
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.activate",
+        subjectType: "prompt_version",
+        subjectId: prompt_version_id,
+        after: { category, block_type, prompt_scope, is_active: true },
+      });
+
       response.body = JSON.stringify({
         message: "Prompt activated successfully",
         category,
@@ -914,6 +1106,24 @@ const routes = {
         return;
       }
 
+      if (body.message_limit !== undefined) {
+        const messageLimitCheck = validateMessageLimit(body.message_limit);
+        if (!messageLimitCheck.valid) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: messageLimitCheck.error });
+          return;
+        }
+      }
+
+      if (body.file_size_limit !== undefined) {
+        const fileSizeLimitCheck = validateFileSizeLimit(body.file_size_limit);
+        if (!fileSizeLimitCheck.valid) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: fileSizeLimitCheck.error });
+          return;
+        }
+      }
+
       const promises = [];
       if (body.bedrock_llm_id) {
         promises.push(
@@ -1023,6 +1233,32 @@ const routes = {
 
       await Promise.all(promises);
 
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "ai_config.update",
+        subjectType: "bedrock_config",
+        before: {
+          bedrock_llm_id: llmRes.Parameter.Value,
+          temperature: Number(tempRes.Parameter.Value),
+          top_p: Number(topPRes.Parameter.Value),
+          max_tokens: Number(maxTokensRes.Parameter.Value),
+        },
+        after: {
+          bedrock_llm_id: selectedModelId,
+          temperature: effectiveConfig.temperature,
+          top_p: effectiveConfig.top_p,
+          max_tokens: effectiveConfig.max_tokens,
+          ...(body.message_limit !== undefined && {
+            message_limit: Number(body.message_limit),
+          }),
+          ...(body.file_size_limit !== undefined && {
+            file_size_limit: Number(body.file_size_limit),
+          }),
+          ...(body.case_types !== undefined && { case_types: body.case_types }),
+        },
+      });
+
       response.statusCode = 200;
       response.body = JSON.stringify({ success: true });
     } catch (err) {
@@ -1081,11 +1317,18 @@ const routes = {
       const body = parseBody(event.body);
       const newValue = body?.value;
 
-      if (!newValue) {
+      if (newValue === undefined || newValue === null) {
         response.statusCode = 400;
         response.body = JSON.stringify({
           error: "Missing 'value' in request body",
         });
+        return;
+      }
+
+      const fileSizeLimitCheck = validateFileSizeLimit(newValue);
+      if (!fileSizeLimitCheck.valid) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({ error: fileSizeLimitCheck.error });
         return;
       }
 
@@ -1156,9 +1399,9 @@ const routes = {
 
       if (!event.body) throw new Error("Request body is missing");
 
-      const { disclaimer_text, version_name, author_id } = parseBody(event.body);
-      // Prefer the authenticated user as author, but allow explicit override when provided
-      const disclaimerAuthorId = author_id || user_id;
+      const { disclaimer_text, version_name } = parseBody(event.body);
+      // Authorship is derived from the authenticated caller, not the request body.
+      const disclaimerAuthorId = user_id;
 
       if (!disclaimer_text)
         throw new Error("Missing 'disclaimer_text' in request body");
@@ -1177,6 +1420,18 @@ const routes = {
             VALUES (${disclaimer_text}, ${nextVersion}, ${version_name || null}, ${disclaimerAuthorId || null}, false)
             RETURNING *;
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.create",
+        subjectType: "disclaimer",
+        subjectId: insertResult[0].disclaimer_id,
+        after: {
+          version_number: nextVersion,
+          version_name: version_name || null,
+        },
+      });
 
       response.body = JSON.stringify(insertResult[0]);
     } catch (err) {
@@ -1342,6 +1597,15 @@ const routes = {
             `;
       });
 
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.activate",
+        subjectType: "disclaimer",
+        subjectId: disclaimer_id,
+        after: { is_active: true },
+      });
+
       response.body = JSON.stringify({
         message: "Disclaimer activated successfully",
       });
@@ -1397,6 +1661,17 @@ const routes = {
               SET roles = ${newRoles}
               WHERE user_email = ${instructorEmail};
             `;
+
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "user_role.elevate_instructor",
+          subjectType: "user",
+          subjectId: existingUser[0].user_id,
+          subjectEmail: instructorEmail,
+          before: { roles: userRoles },
+          after: { roles: newRoles },
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -1456,6 +1731,16 @@ const routes = {
       DELETE FROM "instructor_students"
       WHERE instructor_id = ${user_id};
     `;
+
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "user_role.lower_instructor",
+          subjectType: "user",
+          subjectId: user_id,
+          before: { roles: userRoles },
+          after: { roles: updatedRoles },
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -1521,6 +1806,15 @@ const routes = {
                 WHERE instructor_id = ${instructor_id} AND student_id = ${student_id};
               `;
 
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "instructor_student.unassign",
+          subjectType: "user",
+          subjectId: student_id,
+          after: { instructor_id, student_id },
+        });
+
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: `Instructor ${instructor_id} successfully unassigned from student ${student_id}.`,
@@ -1569,15 +1863,10 @@ const routes = {
           return;
         }
 
-        // Validation: Must be "Infinity" or a number >= 10
-        const isInfinity = limit === "Infinity";
-        const numLimit = parseInt(limit);
-        if (!isInfinity && (isNaN(numLimit) || numLimit < 10)) {
+        const messageLimitCheck = validateMessageLimit(limit);
+        if (!messageLimitCheck.valid) {
           response.statusCode = 400;
-          response.body = JSON.stringify({
-            error:
-              "Limit must be 'Infinity' or a number greater than or equal to 10",
-          });
+          response.body = JSON.stringify({ error: messageLimitCheck.error });
           return;
         }
 
@@ -1695,6 +1984,16 @@ const routes = {
       }
       const { SSMClient, PutParameterCommand } = await import("@aws-sdk/client-ssm");
       const ssm = new SSMClient();
+      let previousMode = null;
+      try {
+        const current = await ssm.send(
+          new GetParameterCommand({ Name: process.env.SIGNUP_MODE_SSM_PARAM }),
+        );
+        previousMode = current.Parameter?.Value ?? null;
+      } catch {
+        previousMode = null;
+      }
+
       await ssm.send(
         new PutParameterCommand({
           Name: process.env.SIGNUP_MODE_SSM_PARAM,
@@ -1703,6 +2002,16 @@ const routes = {
           Type: "String",
         }),
       );
+
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "signup_mode.update",
+        subjectType: "signup_mode",
+        before: previousMode === null ? null : { mode: previousMode },
+        after: { mode },
+      });
+
       response.statusCode = 200;
       response.body = JSON.stringify({ mode });
     } catch (err) {
@@ -1794,6 +2103,13 @@ const routes = {
         return;
       }
 
+      // Only read objects from the key namespace this endpoint's own GET mints.
+      if (!isValidWhitelistKey(s3Key)) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({ error: "Invalid 's3Key'" });
+        return;
+      }
+
       const { S3Client, GetObjectCommand } = await import("@aws-sdk/client-s3");
       const s3 = new S3Client();
       const bucketName = process.env.WHITELIST_UPLOAD_BUCKET;
@@ -1819,41 +2135,29 @@ const routes = {
         labelToRole[key] = key;
       }
 
-      // Parse CSV lines
-      const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      const validItems = [];
-      const invalidRows = [];
+      const { validItems, invalidRows } = parseWhitelistCsv(csvText, labelToRole);
 
-      for (let i = 0; i < lines.length; i++) {
-        const parts = lines[i].split(",");
-        const email = (parts[0] || "").trim().toLowerCase();
-        const label = (parts[1] || "").trim();
-
-        // Skip header row if label column literally says "role"
-        if (i === 0 && label.toLowerCase() === "role") continue;
-
-        const canonicalRole = labelToRole[label.toLowerCase()];
-
-        if (!email || !email.includes("@") || !canonicalRole) {
-          invalidRows.push({
-            row: i + 1,
-            email,
-            label,
-            reason: !canonicalRole ? "unknown role label" : "invalid email",
-          });
-          continue;
-        }
-
-        validItems.push({ email, canonical_role: canonicalRole, uploaded_label: label });
+      // A parse that produced no valid rows must never mutate the table: this
+      // whitelist mints user roles at signup, so an empty or malformed CSV
+      // would otherwise silently wipe it. Leave the table and the uploaded
+      // object untouched so the admin can inspect and fix the file.
+      if (validItems.length === 0) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({
+          error: "No valid rows found in CSV; whitelist unchanged",
+          invalid: invalidRows.length,
+          invalidRows,
+        });
+        return;
       }
 
-      // Replace mode: delete all existing entries, then write new ones
       const { DynamoDBClient, BatchWriteItemCommand, ScanCommand } = await import("@aws-sdk/client-dynamodb");
       const dynamo = new DynamoDBClient();
       const tableName = process.env.WHITELIST_TABLE_NAME;
       const CHUNK_SIZE = 25;
 
-      // Step 1: Scan and delete all existing entries
+      // Snapshot the existing emails so we can reconcile against the new set.
+      const existingEmails = [];
       let lastKey = undefined;
       do {
         const scanResult = await dynamo.send(
@@ -1863,42 +2167,98 @@ const routes = {
             ...(lastKey && { ExclusiveStartKey: lastKey }),
           }),
         );
-        const items = scanResult.Items || [];
-        lastKey = scanResult.LastEvaluatedKey;
-
-        for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-          const chunk = items.slice(i, i + CHUNK_SIZE);
-          const deleteRequests = chunk.map((item) => ({
-            DeleteRequest: { Key: { email: item.email } },
-          }));
-          await dynamo.send(
-            new BatchWriteItemCommand({
-              RequestItems: { [tableName]: deleteRequests },
-            }),
-          );
+        for (const item of scanResult.Items || []) {
+          if (item.email?.S) existingEmails.push(item.email.S);
         }
+        lastKey = scanResult.LastEvaluatedKey;
       } while (lastKey);
 
-      // Step 2: Write new entries in batches of 25
-      let processed = 0;
+      const { toPut, toDelete } = computeWhitelistReconciliation(
+        existingEmails,
+        validItems,
+      );
 
-      for (let i = 0; i < validItems.length; i += CHUNK_SIZE) {
-        const chunk = validItems.slice(i, i + CHUNK_SIZE);
-        const putRequests = chunk.map((item) => ({
-          PutRequest: {
-            Item: {
-              email: { S: item.email },
-              canonical_role: { S: item.canonical_role },
-              uploaded_label: { S: item.uploaded_label },
+      // BatchWriteItem signals partial success with HTTP 200 + UnprocessedItems
+      // (throttling / throughput pressure) rather than throwing. Resubmit those
+      // items with exponential backoff + jitter; if any remain after the
+      // retries, surface it to the caller instead of reporting success.
+      const MAX_BATCH_RETRIES = 8;
+      const sendBatchWithRetry = async (requests) => {
+        let unprocessed = { [tableName]: requests };
+        for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
+          const result = await dynamo.send(
+            new BatchWriteItemCommand({ RequestItems: unprocessed }),
+          );
+          const remaining = result.UnprocessedItems || {};
+          const remainingCount = (remaining[tableName] || []).length;
+          if (remainingCount === 0) return;
+          if (attempt === MAX_BATCH_RETRIES) {
+            throw new Error(
+              `BatchWriteItem left ${remainingCount} unprocessed item(s) after ${MAX_BATCH_RETRIES} retries`,
+            );
+          }
+          unprocessed = remaining;
+          const backoff = Math.min(1000, 2 ** attempt * 50);
+          const jitter = Math.floor(Math.random() * 50);
+          await new Promise((r) => setTimeout(r, backoff + jitter));
+        }
+      };
+
+      // Write-first: upsert all new rows before pruning any stale ones. If a
+      // batch fails mid-run the table still holds the old rows plus whatever
+      // new rows landed — it is never left empty.
+      let processed = 0;
+      try {
+        for (let i = 0; i < toPut.length; i += CHUNK_SIZE) {
+          const chunk = toPut.slice(i, i + CHUNK_SIZE);
+          const putRequests = chunk.map((item) => ({
+            PutRequest: {
+              Item: {
+                email: { S: item.email },
+                canonical_role: { S: item.canonical_role },
+                uploaded_label: { S: item.uploaded_label },
+              },
             },
+          }));
+          await sendBatchWithRetry(putRequests);
+          processed += chunk.length;
+        }
+
+        // Prune only the rows absent from the new set, after all puts succeeded.
+        for (let i = 0; i < toDelete.length; i += CHUNK_SIZE) {
+          const chunk = toDelete.slice(i, i + CHUNK_SIZE);
+          const deleteRequests = chunk.map((email) => ({
+            DeleteRequest: { Key: { email: { S: email } } },
+          }));
+          await sendBatchWithRetry(deleteRequests);
+        }
+      } catch (batchError) {
+        // Partial application: do NOT delete the uploaded object or report
+        // success — a revoked entry may still be live in the table. Record the
+        // partial-failure state so an admin can reconcile.
+        console.error("Whitelist batch write incomplete:", batchError);
+        await recordAudit(env.sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "whitelist.replace.partial_failure",
+          subjectType: "signup_whitelist",
+          after: {
+            error: batchError.message,
+            processed,
+            toPut: toPut.length,
+            toDelete: toDelete.length,
           },
-        }));
-        await dynamo.send(
-          new BatchWriteItemCommand({
-            RequestItems: { [tableName]: putRequests },
-          }),
+        }).catch((auditErr) =>
+          console.error("Failed to record partial-failure audit:", auditErr),
         );
-        processed += chunk.length;
+        response.statusCode = 502;
+        response.body = JSON.stringify({
+          error:
+            "Whitelist update only partially applied; table may be inconsistent. " +
+            "The uploaded file was retained for inspection.",
+          processed,
+        });
+        return;
       }
 
       // Clean up uploaded object after processing.
@@ -1909,6 +2269,14 @@ const routes = {
           Key: s3Key,
         }),
       );
+
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "whitelist.replace",
+        subjectType: "signup_whitelist",
+        after: { processed, invalid: invalidRows.length },
+      });
 
       response.statusCode = 200;
       response.body = JSON.stringify({
@@ -1941,6 +2309,16 @@ const routes = {
           Key: { email: { S: email } },
         }),
       );
+
+      await recordAudit(env.sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "whitelist.remove",
+        subjectType: "signup_whitelist",
+        subjectEmail: email,
+        before: { email },
+      });
+
       response.statusCode = 200;
       response.body = JSON.stringify({ message: "Entry removed", email });
     } catch (err) {
@@ -2011,11 +2389,21 @@ exports.handler = async (event, context) => {
       response.statusCode = 404;
       response.body = JSON.stringify({ error: "Route not found" });
     }
+
+    logger.info("Admin Response", {
+      route: pathData,
+      actorId: userId,
+      statusCode: response.statusCode,
+    });
   } catch (error) {
     response.statusCode = 500;
     logger.error("Handler error", error);
     response.body = JSON.stringify({ error: "Internal server error" });
+    logger.info("Admin Response", {
+      route: event.httpMethod + " " + event.resource,
+      actorId: userId,
+      statusCode: response.statusCode,
+    });
   }
-  logger.info("Admin Response", { statusCode: response.statusCode });
   return response;
 };

@@ -9,6 +9,7 @@ from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
 
 from helpers.chat import get_bedrock_llm, generate_case_title
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 
 # Set up logging and metrics for the Lambda function
 logger = Logger(service="CaseGeneration")
@@ -26,6 +27,7 @@ BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
 CASE_TYPES_PARAM = os.environ.get("CASE_TYPES_PARAM")
 GUARDRAIL_ID = os.environ["GUARDRAIL_ID"]
 GUARDRAIL_VERSION = os.environ["GUARDRAIL_VERSION"]
+MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]
 
 # AWS clients
 secrets_manager_client = boto3.client("secretsmanager")
@@ -40,6 +42,7 @@ TABLE_NAME = None
 BEDROCK_TEMP = 0.7
 BEDROCK_TOP_P = 0.9
 BEDROCK_MAX_TOKENS = 150
+MESSAGE_LIMIT = None
 
 DEFAULT_ALLOWED_CASE_TYPES = ["Other"]
 
@@ -105,9 +108,13 @@ def parse_case_types(raw_value):
 
 
 def initialize_constants():
-    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS, ALLOWED_CASE_TYPES
+    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS, ALLOWED_CASE_TYPES, MESSAGE_LIMIT
     BEDROCK_LLM_ID = get_parameter(BEDROCK_LLM_PARAM, BEDROCK_LLM_ID)
     TABLE_NAME = get_parameter(TABLE_NAME_PARAM, TABLE_NAME)
+
+    MESSAGE_LIMIT = get_parameter(MESSAGE_LIMIT_PARAM, MESSAGE_LIMIT)
+    if MESSAGE_LIMIT is None:
+        MESSAGE_LIMIT = "Infinity"
 
     if BEDROCK_TEMP_PARAM:
         temp_val = get_parameter(BEDROCK_TEMP_PARAM, None)
@@ -161,7 +168,12 @@ def connect_to_db():
             connection = None
 
     secret = get_secret(DB_SECRET_NAME)
-    conn_str = f"host={RDS_PROXY_ENDPOINT} dbname={secret['dbname']} user={secret['username']} password={secret['password']} port={secret['port']}"
+    # Require TLS and verify the server certificate and hostname. The RDS Proxy
+    # presents a certificate from the public Amazon CA chain; point sslrootcert
+    # at the OS CA bundle (which contains the Amazon roots) rather than "system",
+    # which the psycopg binary wheel's bundled OpenSSL does not resolve to the
+    # container's trust store.
+    conn_str = f"host={RDS_PROXY_ENDPOINT} dbname={secret['dbname']} user={secret['username']} password={secret['password']} port={secret['port']} sslmode=verify-full sslrootcert=/etc/pki/tls/certs/ca-bundle.crt"
     try:
         connection = psycopg.connect(conn_str)
         logger.info("Connected to RDS via proxy")
@@ -213,7 +225,7 @@ def update_title(case_id, title):
 def get_cors_origin(event):
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
     if not allowed_origin:
-        return "*"
+        return "http://localhost:5173"
     return allowed_origin
 
 
@@ -306,6 +318,31 @@ def handler(event, context):
                 event,
                 field_errors=field_errors,
             )
+
+        # Require the user to have accepted the legal/AI-use waiver before any
+        # AI feature runs. Fails closed if the acceptance state cannot be read.
+        try:
+            conn = connect_to_db()
+            if not is_disclaimer_accepted(conn, user_id):
+                return create_response(403, {'error': 'You must accept the disclaimer before using the AI assistant.', 'code': 'DISCLAIMER_NOT_ACCEPTED'}, event)
+        except Exception as e:
+            logger.error(f"Error checking disclaimer acceptance: {e}")
+            return create_response(503, {'error': 'Service temporarily unavailable. Please try again later.'}, event)
+
+        # Enforce the daily message limit before invoking Bedrock. Counts as one
+        # message per request and fails closed if the usage check cannot complete.
+        initialize_constants()
+        if MESSAGE_LIMIT != "Infinity":
+            try:
+                limit = int(MESSAGE_LIMIT)
+                conn = connect_to_db()
+                current_usage = check_and_increment_usage(conn, user_id)
+                logger.info(f"User {user_id} usage: {current_usage}/{limit}")
+                if current_usage > limit:
+                    return create_response(429, {'error': 'Daily message limit reached. Please contact your administrator.'}, event)
+            except Exception as e:
+                logger.error(f"Error checking message limit: {e}")
+                return create_response(503, {'error': 'Service temporarily unavailable. Please try again later.'}, event)
 
         combined = f"{case_title} {case_type} {jurisdiction} {case_desc}"
         

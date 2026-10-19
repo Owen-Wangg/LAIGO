@@ -186,10 +186,10 @@ const ModelConfigSection: React.FC<{
 }> = React.memo(({ config, onConfigChange, availableModels, label }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const selectedModel = availableModels.find((m) => m.id === config.modelId);
-  const temperatureMin = selectedModel?.constraints?.temperatureRange[0] ?? 0;
-  const temperatureMax = selectedModel?.constraints?.temperatureRange[1] ?? 1;
-  const topPMin = selectedModel?.constraints?.topPRange[0] ?? 0;
-  const topPMax = selectedModel?.constraints?.topPRange[1] ?? 1;
+  const temperatureMin = selectedModel?.constraints?.temperatureRange?.[0] ?? 0;
+  const temperatureMax = selectedModel?.constraints?.temperatureRange?.[1] ?? 1;
+  const topPMin = selectedModel?.constraints?.topPRange?.[0] ?? 0;
+  const topPMax = selectedModel?.constraints?.topPRange?.[1] ?? 1;
   const maxTokensLimit = selectedModel?.constraints?.maxOutputTokens ?? 8192;
 
   return (
@@ -1381,7 +1381,7 @@ const PromptPlayground: React.FC = () => {
   }, []);
 
   const { sendStreamingRequest, isConnected } = useWebSocket(wsUrl, {
-    protocols: token ? [token] : undefined,
+    protocols: token ? [token, "chat.v1"] : undefined,
   });
 
   // Fetch reasoning prompt versions when block type changes
@@ -1391,7 +1391,7 @@ const PromptPlayground: React.FC = () => {
       const token = session.tokens?.idToken?.toString();
       if (!token) return;
       const response = await fetch(
-        `${import.meta.env.VITE_API_ENDPOINT}admin/prompt?category=reasoning&block_type=${blockType}`,
+        `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt?category=reasoning&block_type=${blockType}`,
         {
           headers: { Authorization: token },
         },
@@ -1411,7 +1411,7 @@ const PromptPlayground: React.FC = () => {
       const token = session.tokens?.idToken?.toString();
       if (!token) return;
       const response = await fetch(
-        `${import.meta.env.VITE_API_ENDPOINT}admin/prompt?category=assessment&block_type=${blockType}`,
+        `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt?category=assessment&block_type=${blockType}`,
         {
           headers: { Authorization: token },
         },
@@ -1562,7 +1562,7 @@ const PromptPlayground: React.FC = () => {
         }
 
         const response = await fetch(
-          `${import.meta.env.VITE_API_ENDPOINT}admin/prompt`,
+          `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt`,
           {
             method: "PUT",
             headers: {
@@ -1614,7 +1614,7 @@ const PromptPlayground: React.FC = () => {
         }
 
         const response = await fetch(
-          `${import.meta.env.VITE_API_ENDPOINT}admin/prompt`,
+          `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt`,
           {
             method: "PUT",
             headers: {

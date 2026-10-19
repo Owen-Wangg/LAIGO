@@ -43,7 +43,7 @@ You also need AWS credentials configured (`aws configure` or SSO profile), and p
 
 ### Custom Domain (Optional)
 
-The `DomainName` context parameter lets you serve the frontend on your own domain and lock down CORS to that origin. Without it, the app runs on the default Amplify domain and CORS allows all origins (`*`).
+The `DomainName` context parameter lets you serve the frontend on your own domain and lock down CORS to that origin. If you want to lock CORS without registering a custom domain (for example, to stay on the default Amplify URL), use `FrontendOrigin` instead, which sets the CORS origin only. A `prod` deployment requires one of `DomainName` or `FrontendOrigin`; in `dev`/`test` without either, the app runs on the default Amplify domain and CORS allows all origins (`*`).
 
 **When you should use this:**
 
@@ -54,7 +54,7 @@ The `DomainName` context parameter lets you serve the frontend on your own domai
 **What it does:**
 
 - Configures Amplify to serve the frontend on your custom domain
-- Locks CORS `Access-Control-Allow-Origin` to `https://<DomainName>` across all API endpoints and the S3 audio bucket
+- Locks CORS `Access-Control-Allow-Origin` to `https://<DomainName>` across all API endpoints and the S3 audio and whitelist-upload buckets
 - Tightens the Content-Security-Policy `connect-src` directive to only allow your specific API and WebSocket endpoints
 - Local development uses the Vite dev server proxy (configured in `vite.config.ts`) to avoid CORS issues
 
@@ -104,6 +104,8 @@ This deployment creates:
 You must create a GitHub personal access token (classic) with the `repo` scope. Follow GitHub instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic).
 
 **Save the token value securely. You will upload it to AWS Secrets Manager in Step 2.**
+
+> **Important:** The token lets CDK create the Amplify app, but Amplify runs builds through the **Amplify GitHub App**. After deployment, open the Amplify app in the console, reconnect the repository using the GitHub App method, and authorize it on your repo. Until you do this, the Amplify build fails immediately with `Unable to assume specified IAM Role` (this error is about repo access, not IAM). See [setting up Amplify access to GitHub](https://docs.aws.amazon.com/amplify/latest/userguide/setting-up-GitHub-access.html).
 
 ### Enable Models in Bedrock
 
@@ -403,7 +405,8 @@ LAIGO supports two optional context parameters that can be combined independentl
 
 | Parameter | Purpose | When to use |
 |---|---|---|
-| `DomainName` | Custom frontend domain and CORS lockdown | You want a branded URL and tighter API security |
+| `DomainName` | Custom frontend domain (registered in Amplify) and CORS lockdown | You want a branded URL and tighter API security |
+| `FrontendOrigin` | CORS lockdown only, without registering a custom domain | You run `prod` on the default Amplify domain and want restricted CORS |
 | `SesVerifiedDomain` | SES-based email for Cognito | You need more than ~50 sign-ups/day, or want branded sender emails |
 
 See the [Requirements](#requirements) section for full details and prerequisites for each option.
@@ -415,7 +418,12 @@ Deploy all stacks using the command that matches your setup. Replace:
 - `<YOUR-PROFILE-NAME>` with the AWS CLI profile used earlier.
 - `<YOUR-STACK-PREFIX>` with your stack prefix.
 
-The stack prefix is added to physical resource names. `Environment` specifies the deployment environment (`dev`, `test`, `prod`), and `Version` specifies the application version.
+The stack prefix is added to physical resource names. `Environment` specifies the deployment environment and must be one of `dev`, `test`, or `prod` (`production` and `development` are also accepted as aliases of `prod` and `dev`); any other value stops the deploy with an error. Use `prod` for production deployments so environment-sensitive hardening (restricted CORS, retained S3 buckets, disabled request-body logging, whitelist signup) is enabled. `Version` specifies the application version.
+
+A `prod` deployment must lock CORS to a known frontend origin, so you must pass one of:
+
+- `DomainName` — a custom domain (host only, e.g. `app.example.com`). It is both registered in Amplify and used as the CORS origin. Do not pass an Amplify-managed `*.amplifyapp.com` value here; Amplify rejects its own managed domains as custom domains.
+- `FrontendOrigin` — an explicit origin URL (e.g. `https://main.xxxxx.amplifyapp.com`) used only for CORS lockdown. Use this to run `prod` on the default Amplify domain without registering a custom domain.
 
 **Option A: No custom domain, no SES (simplest)**
 
@@ -430,6 +438,27 @@ npx cdk deploy --all \
     --profile <YOUR-PROFILE-NAME>
 ```
 
+To harden a deployment that stays on the default Amplify domain, deploy with `Environment=prod` and pass the Amplify URL as `FrontendOrigin` (no custom domain is registered):
+
+```bash
+npx cdk deploy --all \
+    --context StackPrefix=<YOUR-STACK-PREFIX> \
+    --context Environment=prod \
+    --context Version=1.2.0 \
+    --context GithubRepo="LAIGO" \
+    --context FrontendOrigin="https://main.xxxxx.amplifyapp.com" \
+    --profile <YOUR-PROFILE-NAME>
+```
+
+> **First-time `prod` on the default Amplify domain (two-phase bootstrap)**
+>
+> The Amplify app and its URL (`https://main.<appId>.amplifyapp.com`) don't exist until the first deploy creates them, and `<appId>` is assigned by Amplify at creation time — so you can't know `FrontendOrigin` up front. A `prod` deploy also requires an origin, so the very first deploy can't be `prod` on the default domain. Bootstrap it in two steps:
+>
+> 1. Deploy once with `Environment=dev` (Option A). This creates the Amplify app; CORS is `*` for now.
+> 2. Copy the app URL from the deploy output (or the Amplify console), then redeploy with `Environment=prod` and `FrontendOrigin="https://main.<appId>.amplifyapp.com"` (the command above).
+>
+> The `appId` is stable across redeploys, so this is a one-time step. If you have a custom domain, skip all of this and deploy `prod` with `DomainName` from the start (Option B) — you already know that value.
+
 **Option B: Custom domain only (no SES)**
 
 Serves the frontend on your domain and locks down CORS. Cognito still uses its built-in email service (50 emails/day limit). Good for production deployments with a small user base.
@@ -437,7 +466,7 @@ Serves the frontend on your domain and locks down CORS. Cognito still uses its b
 ```bash
 npx cdk deploy --all \
     --context StackPrefix=<YOUR-STACK-PREFIX> \
-    --context Environment=dev \
+    --context Environment=prod \
     --context Version=1.2.0 \
     --context GithubRepo="LAIGO" \
     --context DomainName="app.example.com" \
@@ -465,7 +494,7 @@ Serves the frontend on your domain, locks down CORS, and sends emails through SE
 ```bash
 npx cdk deploy --all \
     --context StackPrefix=<YOUR-STACK-PREFIX> \
-    --context Environment=dev \
+    --context Environment=prod \
     --context Version=1.2.0 \
     --context GithubRepo="LAIGO" \
     --context DomainName="app.example.com" \

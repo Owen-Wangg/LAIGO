@@ -64,6 +64,57 @@ export class WafStack extends cdk.Stack {
             metricName: "LimitRequests1000-CloudFront",
           },
         },
+        {
+          // SQL injection protection for request parameters, body, and headers
+          name: "AWS-AWSManagedRulesSQLiRuleSet",
+          priority: 3,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesSQLiRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesSQLiRuleSet-CloudFront",
+          },
+        },
+        {
+          // Blocks request patterns known to be invalid or associated with exploits
+          name: "AWS-AWSManagedRulesKnownBadInputsRuleSet",
+          priority: 4,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesKnownBadInputsRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesKnownBadInputsRuleSet-CloudFront",
+          },
+        },
+        {
+          // Blocks sources on the Amazon threat-intelligence IP reputation list
+          name: "AWS-AWSManagedRulesAmazonIpReputationList",
+          priority: 5,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesAmazonIpReputationList",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesAmazonIpReputationList-CloudFront",
+          },
+        },
       ],
     });
 
@@ -91,6 +142,8 @@ export class WafStack extends cdk.Stack {
           arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
         }),
       ],
+      // Keep bearer tokens out of request logs
+      redactedFields: [{ singleHeader: { Name: "authorization" } }],
     });
 
     // Export WAF ARN for reference

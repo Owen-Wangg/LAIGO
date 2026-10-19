@@ -110,6 +110,8 @@ const routes = {
             FROM cases c
             JOIN case_reviewers cr ON c.case_id = cr.case_id
             JOIN users u ON c.student_id = u.user_id
+            JOIN instructor_students isr ON isr.instructor_id = cr.reviewer_id
+              AND isr.student_id = c.student_id
             WHERE cr.reviewer_id = ${instructorUserId}
             AND c.status = 'submitted'
             AND c.sent_to_review = true;

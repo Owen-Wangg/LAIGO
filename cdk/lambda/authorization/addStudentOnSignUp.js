@@ -27,6 +27,8 @@ const dynamoClient = new DynamoDBClient();
 
 /**
  * Looks up the signup mode from SSM. Returns 'public' if not configured.
+ * On any read failure it returns 'public', which maps to the least-privileged
+ * role in the handler, so an unreadable parameter can never escalate access.
  */
 async function getSignupMode() {
   if (!SIGNUP_MODE_PARAM) return "public";
@@ -36,7 +38,10 @@ async function getSignupMode() {
     );
     return result?.Parameter?.Value || "public";
   } catch (err) {
-    logger.warn("Could not read SignupMode SSM param, defaulting to public", { err });
+    logger.warn(
+      "Could not read SignupMode SSM param; resolving to least-privileged role",
+      { err },
+    );
     return "public";
   }
 }
@@ -65,6 +70,43 @@ class UserError extends Error {
   constructor(message) {
     super(message);
     this.name = "UserError";
+  }
+}
+
+/**
+ * Record a durable row in audit_log for an admin role granted during signup.
+ *
+ * Covers the two paths that provision an admin without an interactive admin
+ * action: the first-user bootstrap and a whitelist-derived admin role. The
+ * acting principal is the system (signup trigger), the subject is the new user.
+ * Failures are swallowed and logged so an audit write can never block the
+ * post-confirmation flow.
+ *
+ * @param {Object} entry
+ * @param {string} entry.action - machine-readable action name
+ * @param {string} entry.subjectEmail - email of the newly provisioned user
+ * @param {*} [entry.after] - resulting state (serialized to jsonb)
+ */
+async function recordSignupAudit(entry) {
+  if (!sqlConnection) return;
+  try {
+    const after =
+      entry.after === undefined || entry.after === null
+        ? null
+        : JSON.stringify(entry.after);
+
+    await sqlConnection`
+      INSERT INTO audit_log (
+        actor_email, action, subject_type, subject_email, after_state
+      ) VALUES (
+        ${"system:signup"}, ${entry.action}, ${"user"}, ${entry.subjectEmail ?? null}, ${after}::jsonb
+      );
+    `;
+  } catch (err) {
+    logger.error("Failed to write signup audit record", {
+      action: entry?.action,
+      errorMessage: err?.message,
+    });
   }
 }
 
@@ -109,6 +151,9 @@ exports.handler = async (event) => {
     const lastName =
       attributes.find((attr) => attr.Name === "family_name")?.Value || "";
     const idpId = attributes.find((attr) => attr.Name === "sub")?.Value; // IDP User ID (UUID)
+    const emailVerified =
+      attributes.find((attr) => attr.Name === "email_verified")?.Value ===
+      "true";
 
     // Return error if email attribute is missing
     if (!email) {
@@ -116,25 +161,106 @@ exports.handler = async (event) => {
       throw new UserError("Email attribute not found in Cognito user");
     }
 
-    // Check if user already exists in database
-    const existingUser = await sqlConnection`
-      SELECT * FROM "users" WHERE idp_id = ${idpId} OR user_email = ${email};
-    `;
+    // The stored user_email may only be (re)written from a freshly verified
+    // email during the initial sign-up confirmation. A self-service email
+    // change leaves email_verified=false, and later trigger sources such as
+    // PostConfirmation_ConfirmForgotPassword re-fire with an attribute the user
+    // controls; honouring those would let an account rewrite its email to a
+    // third party's address and inherit email-keyed role grants.
+    const canWriteEmail =
+      emailVerified && event.triggerSource === "PostConfirmation_ConfirmSignUp";
 
-    if (existingUser.length > 0) {
-      // Update existing user's information
-      logger.info("Updating existing user in database");
-      await sqlConnection`
-        UPDATE "users"
-        SET
-          first_name = ${firstName},
-          last_name = ${lastName},
-          last_sign_in = CURRENT_TIMESTAMP,
-          idp_id = ${idpId}
-        WHERE user_email = ${email}
-        RETURNING *;
-      `;
+    // Normalize the email so storage and lookups match the lowercase form used
+    // by the pre-signup trigger and the whitelist lookups.
+    const normalizedEmail = email.toLowerCase().trim();
 
+    // Look up any existing row for this identity, and — only when the email is
+    // trusted (a freshly verified sign-up confirmation) — any row matching the
+    // email as well, so a verified confirmation can link a pre-provisioned or
+    // whitelist-seeded row. When the email is not trusted it must never drive
+    // row matching: an attacker could otherwise point an unverified attribute
+    // at another user's address and inherit that row's user_id and roles, so
+    // we restrict the lookup to the caller's own identity. The currently bound
+    // identity is included so we can tell a legitimate rebind from a conflict.
+    // Email is compared in canonical (lowercased, trimmed) form so rows stored
+    // in a non-canonical form by earlier writes are still matched.
+    const existingUsers = canWriteEmail
+      ? await sqlConnection`
+          SELECT user_id, idp_id, user_email
+          FROM "users"
+          WHERE idp_id = ${idpId} OR lower(trim(user_email)) = ${normalizedEmail};
+        `
+      : await sqlConnection`
+          SELECT user_id, idp_id, user_email
+          FROM "users"
+          WHERE idp_id = ${idpId};
+        `;
+
+    const emailMatch = existingUsers.find(
+      (row) =>
+        typeof row.user_email === "string" &&
+        row.user_email.toLowerCase().trim() === normalizedEmail,
+    );
+    const idpMatch = existingUsers.find((row) => row.idp_id === idpId);
+
+    // A row already bound to a different identity must not be re-bound here:
+    // doing so would hand the new identity the existing row's user_id and roles.
+    // Leave it untouched and let the account proceed without a profile until an
+    // administrator reconciles it (see docs/userRemovalGuide.md).
+    const conflictingEmailRow =
+      emailMatch && emailMatch.idp_id && emailMatch.idp_id !== idpId;
+
+    if (conflictingEmailRow) {
+      logger.warn(
+        "Email already bound to an existing identity; skipping profile rebind",
+      );
+      return event;
+    }
+
+    // Resolve the row to update: prefer the identity match, otherwise the email
+    // row that is unbound or already bound to this identity.
+    const targetRow = idpMatch || emailMatch;
+
+    if (targetRow) {
+      // Update the existing row by its primary key. Roles are intentionally
+      // left unchanged — this trigger never alters an existing user's roles.
+      // user_email is only rewritten on a verified sign-up confirmation;
+      // otherwise the stored email is left as-is to prevent email takeover.
+      logger.info("Updating existing user in database", { canWriteEmail });
+      if (canWriteEmail) {
+        await sqlConnection`
+          UPDATE "users"
+          SET
+            first_name = ${firstName},
+            last_name = ${lastName},
+            last_sign_in = CURRENT_TIMESTAMP,
+            idp_id = ${idpId},
+            user_email = ${normalizedEmail}
+          WHERE user_id = ${targetRow.user_id}
+          RETURNING *;
+        `;
+      } else {
+        await sqlConnection`
+          UPDATE "users"
+          SET
+            first_name = ${firstName},
+            last_name = ${lastName},
+            last_sign_in = CURRENT_TIMESTAMP,
+            idp_id = ${idpId}
+          WHERE user_id = ${targetRow.user_id}
+          RETURNING *;
+        `;
+      }
+    } else if (!canWriteEmail) {
+      // No row is bound to this identity and the email is not from a freshly
+      // verified sign-up confirmation. Creating a profile here would seed a row
+      // (and a whitelist-derived role) from an untrusted, user-controlled email
+      // address. Skip creation: the account proceeds without a profile until a
+      // verified sign-up confirmation runs or an administrator reconciles it
+      // (see docs/userRemovalGuide.md).
+      logger.warn(
+        "No identity-matched user row and email is unverified; skipping profile creation",
+      );
     } else {
       // Determine the role for the new user
       let defaultRole;
@@ -148,27 +274,41 @@ exports.handler = async (event) => {
       if (isFirstUser) {
         defaultRole = "admin";
         logger.info("First user in system, assigning admin role");
+        await recordSignupAudit({
+          action: "user_role.bootstrap_admin",
+          subjectEmail: normalizedEmail,
+          after: { roles: ["admin"] },
+        });
       } else {
-        // Check signup mode to determine role
+        // Check signup mode to determine role. Any inability to determine the
+        // mode or the whitelist role resolves to the least-privileged role so
+        // an error path can never grant more than student access.
         const signupMode = await getSignupMode();
         logger.info("New user signup", { signupMode });
 
         if (signupMode === "whitelist") {
           // Look up the canonical role from the DynamoDB whitelist
-          const whitelistRole = await getWhitelistRole(email);
+          const whitelistRole = await getWhitelistRole(normalizedEmail);
           if (whitelistRole) {
             defaultRole = whitelistRole;
             logger.info("Assigning role from whitelist", { defaultRole });
+            if (defaultRole === "admin") {
+              await recordSignupAudit({
+                action: "user_role.signup_whitelist_admin",
+                subjectEmail: normalizedEmail,
+                after: { roles: ["admin"] },
+              });
+            }
           } else {
-            // Fallback: whitelist check in preSignup should have blocked this,
-            // but defensively default to student if something slips through
+            // Whitelist check in preSignup should have blocked this; default to
+            // the least-privileged role if the role cannot be determined here.
             logger.warn(
-              "Email not in whitelist during post-confirmation, defaulting to student",
+              "Whitelist role could not be determined, defaulting to student",
             );
             defaultRole = "student";
           }
         } else {
-          // Public mode: default to student
+          // Public mode (and the fail-closed default): least-privileged role.
           defaultRole = "student";
         }
       }
@@ -181,7 +321,7 @@ exports.handler = async (event) => {
       // Create new user with the determined role
       await sqlConnection`
         INSERT INTO "users" (idp_id, user_email, first_name, last_name, time_account_created, roles, last_sign_in)
-        VALUES (${idpId}, ${email}, ${firstName}, ${lastName}, CURRENT_TIMESTAMP, ARRAY[${defaultRole}]::user_role[], CURRENT_TIMESTAMP)
+        VALUES (${idpId}, ${normalizedEmail}, ${firstName}, ${lastName}, CURRENT_TIMESTAMP, ARRAY[${defaultRole}]::user_role[], CURRENT_TIMESTAMP)
         RETURNING *;
       `;
 

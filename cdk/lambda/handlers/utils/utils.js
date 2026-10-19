@@ -15,7 +15,8 @@ let corsWildcardWarned = false;
 /**
  * Resolves the CORS origin for a response based on the ALLOWED_ORIGIN env var.
  *
- * - If ALLOWED_ORIGIN is not set, returns "*" (wildcard fallback for local/dev).
+ * - If ALLOWED_ORIGIN is not set, returns the local Vite dev-server origin
+ *   (http://localhost:5173) as a non-production fallback.
  * - If ALLOWED_ORIGIN is set, returns that value.
  *
  * @param {object} event - The Lambda event object (optional, pass {} if unavailable)
@@ -26,11 +27,11 @@ const getOriginHeader = (event) => {
   if (!allowedOrigin) {
     if (!corsWildcardWarned) {
       logger.warn(
-        "ALLOWED_ORIGIN is unset; CORS responses use Access-Control-Allow-Origin: *",
+        "ALLOWED_ORIGIN is unset; CORS responses fall back to Access-Control-Allow-Origin: http://localhost:5173",
       );
       corsWildcardWarned = true;
     }
-    return "*";
+    return "http://localhost:5173";
   }
 
   return allowedOrigin;
@@ -70,20 +71,26 @@ const handleError = (error, response) => {
   });
 };
 
-// Lambda execution context cache for user metadata
+// Lambda execution context cache for user metadata.
+// Entries carry an expiry so that role changes in the database become
+// effective within a bounded window instead of persisting for the full
+// lifetime of a warm container.
+const USER_METADATA_CACHE_TTL_MS = 60 * 1000;
 let userMetadataCache = {};
 
 /**
- * Retrieves user metadata from the database by IDP ID with Lambda execution context caching.
+ * Retrieves user metadata from the database by IDP ID with bounded-TTL caching
+ * across the warm Lambda execution context.
  *
  * @param {string} idpId - The IDP user identifier (e.g., Cognito sub claim)
  * @returns {Promise<Object>} User object with user_id, email, first_name, last_name, roles
  * @throws {Error} Throws "User not found" if user doesn't exist in database
  */
 const getUserMetadata = async (idpId) => {
-  // Check cache first
-  if (userMetadataCache[idpId]) {
-    return userMetadataCache[idpId];
+  // Serve from cache only when the entry has not expired.
+  const cached = userMetadataCache[idpId];
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.user;
   }
 
   // Ensure database connection is initialized
@@ -112,8 +119,11 @@ const getUserMetadata = async (idpId) => {
     roles: result[0].roles,
   };
 
-  // Cache for this execution context
-  userMetadataCache[idpId] = user;
+  // Cache with a bounded expiry so stale roles cannot outlive the TTL.
+  userMetadataCache[idpId] = {
+    user,
+    expiresAt: Date.now() + USER_METADATA_CACHE_TTL_MS,
+  };
 
   return user;
 };

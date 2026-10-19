@@ -83,10 +83,12 @@ const ModelConfig = () => {
 
   const selectedModelConstraints =
     modelOptions.find((option) => option.value === bedrockLlmId)?.constraints;
-  const temperatureMin = selectedModelConstraints?.temperatureRange[0] ?? 0;
-  const temperatureMax = selectedModelConstraints?.temperatureRange[1] ?? 1;
-  const topPMin = selectedModelConstraints?.topPRange[0] ?? 0;
-  const topPMax = selectedModelConstraints?.topPRange[1] ?? 1;
+  // Optional-chain the array access too: some models omit range constraints
+  // entirely, and `undefined[0]` would otherwise crash the whole page.
+  const temperatureMin = selectedModelConstraints?.temperatureRange?.[0] ?? 0;
+  const temperatureMax = selectedModelConstraints?.temperatureRange?.[1] ?? 1;
+  const topPMin = selectedModelConstraints?.topPRange?.[0] ?? 0;
+  const topPMax = selectedModelConstraints?.topPRange?.[1] ?? 1;
 
   const fetchAiConfig = useCallback(async () => {
     setIsAiConfigLoading(true);

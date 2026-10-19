@@ -48,7 +48,10 @@ async function initializeConnection() {
       database: credentials.dbname,
       username: credentials.username,
       password: credentials.password,
-      ssl: "require",
+      // Verify the server certificate and hostname against the system trust
+      // store (the RDS Proxy presents an ACM-issued certificate from a public
+      // Amazon CA). Encryption alone without verification is not sufficient.
+      ssl: { rejectUnauthorized: true },
       max: 1, // Single connection per Lambda instance
       idle_timeout: 20,
       connect_timeout: 10,

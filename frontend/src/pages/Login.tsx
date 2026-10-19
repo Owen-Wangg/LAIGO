@@ -21,6 +21,7 @@ import {
 } from "@mui/icons-material";
 import {
   signIn,
+  signOut,
   signUp,
   resetPassword,
   confirmResetPassword,
@@ -85,6 +86,24 @@ const Login = () => {
     // Strips common Cognito Lambda trigger error prefixes
     // Format: "[TriggerName] failed with error [Real Message]"
     return message.replace(/^\w+ failed with error\s+/, "");
+  };
+
+  // Maps sign-in errors to user-facing messages. Unknown-account and
+  // wrong-password outcomes are collapsed into a single generic message so the
+  // response is uniform regardless of whether the account exists; actionable,
+  // non-revealing states keep their specific guidance.
+  const signInErrorMessage = (err: Error) => {
+    switch (err.name) {
+      case "UserNotFoundException":
+      case "NotAuthorizedException":
+        return "Incorrect email or password.";
+      case "UserNotConfirmedException":
+        return "Please confirm your account before signing in.";
+      case "PasswordResetRequiredException":
+        return "A password reset is required before you can sign in.";
+      default:
+        return cleanErrorMessage(err.message) || "Something went wrong";
+    }
   };
 
   const validateSignUpForm = () => {
@@ -163,17 +182,52 @@ const Login = () => {
         });
         setIsConfirmingSignUp(true); // Set the step to confirmation after sign-up
       } else {
-        const user = await signIn({ username: email, password });
+        let user;
+        try {
+          user = await signIn({ username: email, password });
+        } catch (e) {
+          // A stale Cognito session can linger if a previous load failed before
+          // the app mounted (e.g. a backend error on /student/profile). In that
+          // case signIn throws UserAlreadyAuthenticatedException. Clear the stale
+          // session and retry so the user isn't stuck on the login screen.
+          if ((e as Error).name === "UserAlreadyAuthenticatedException") {
+            await signOut();
+            user = await signIn({ username: email, password });
+          } else {
+            throw e;
+          }
+        }
         if (user.isSignedIn) {
           window.location.reload();
         }
       }
     } catch (err) {
-      setSnackbar({
-        open: true,
-        message: cleanErrorMessage((err as Error).message) || "Something went wrong",
-        severity: "error",
-      });
+      const error = err as Error;
+      if (isSignUp) {
+        // Do not reveal whether an account already exists. Mirror the success
+        // path for an existing email so sign-up looks identical whether or not
+        // the address is already registered.
+        if (error.name === "UsernameExistsException") {
+          setSnackbar({
+            open: true,
+            message: "Sign up successful. Check your email to confirm.",
+            severity: "success",
+          });
+          setIsConfirmingSignUp(true);
+        } else {
+          setSnackbar({
+            open: true,
+            message: cleanErrorMessage(error.message) || "Something went wrong",
+            severity: "error",
+          });
+        }
+      } else {
+        setSnackbar({
+          open: true,
+          message: signInErrorMessage(error),
+          severity: "error",
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -230,6 +284,17 @@ const Login = () => {
         setStep("requestReset");
       }
     } catch (err) {
+      // Mirror the success path for an unknown email so the reset flow does not
+      // reveal whether an account exists for the address.
+      if ((err as Error).name === "UserNotFoundException") {
+        setSnackbar({
+          open: true,
+          message: "Check your email for the confirmation code.",
+          severity: "success",
+        });
+        setStep("confirmReset");
+        return;
+      }
       setSnackbar({
         open: true,
         message: cleanErrorMessage((err as Error).message),

@@ -85,15 +85,26 @@ exports.handler = async (event) => {
   // Connection valid (authorized by Lambda Authorizer)
   const response = { statusCode: 200, body: "Connected" };
 
-  // Echo a fixed protocol name instead of the raw token to avoid credential leakage in logs (AUTH-WS-04)
+  // Negotiate the WebSocket subprotocol. Per RFC 6455, the server may only
+  // select a subprotocol the client actually offered; returning one the client
+  // did not send causes the browser to fail the handshake. We echo a fixed
+  // "chat.v1" protocol name (never the raw token, to avoid credential leakage
+  // in logs — AUTH-WS-04), but ONLY when the client offered it. Older clients
+  // that send just the token get no subprotocol back, which browsers accept.
   const headers = event.headers || {};
   const protocolHeader =
     headers["Sec-WebSocket-Protocol"] || headers["sec-websocket-protocol"];
 
   if (protocolHeader) {
-    response.headers = {
-      "Sec-WebSocket-Protocol": "chat.v1",
-    };
+    const offeredProtocols = protocolHeader
+      .split(",")
+      .map((p) => p.trim());
+
+    if (offeredProtocols.includes("chat.v1")) {
+      response.headers = {
+        "Sec-WebSocket-Protocol": "chat.v1",
+      };
+    }
   }
 
   return response;

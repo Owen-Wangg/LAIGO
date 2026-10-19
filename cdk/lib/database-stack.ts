@@ -1,5 +1,5 @@
 // AWS CDK imports for core functionality
-import { Stack, StackProps, RemovalPolicy, SecretValue } from "aws-cdk-lib";
+import { Stack, StackProps, RemovalPolicy, CfnDynamicReference, CfnDynamicReferenceService } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { Duration } from "aws-cdk-lib";
 
@@ -79,9 +79,10 @@ export class DatabaseStack extends Stack {
       secretName: secretPathUserName,
       description: "Secrets for clients to connect to RDS",
       removalPolicy: RemovalPolicy.DESTROY,
-      secretObjectValue: {
-        username: SecretValue.unsafePlainText("applicationUsername"), // Placeholder - updated at runtime
-        password: SecretValue.unsafePlainText("applicationPassword"), // Placeholder - updated at runtime
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ username: "placeholder" }), // Updated at runtime
+        generateStringKey: "password", // Updated at runtime
+        excludePunctuation: true,
       },
     });
 
@@ -94,9 +95,10 @@ export class DatabaseStack extends Stack {
         secretName: secretPathTableCreator,
         description: "Secrets for TableCreator to connect to RDS",
         removalPolicy: RemovalPolicy.DESTROY,
-        secretObjectValue: {
-          username: SecretValue.unsafePlainText("applicationUsername"), // Placeholder - updated at runtime
-          password: SecretValue.unsafePlainText("applicationPassword"), // Placeholder - updated at runtime
+        generateSecretString: {
+          secretStringTemplate: JSON.stringify({ username: "placeholder" }), // Updated at runtime
+          generateStringKey: "password", // Updated at runtime
+          excludePunctuation: true,
         },
       },
     );
@@ -131,7 +133,10 @@ export class DatabaseStack extends Stack {
         ec2.InstanceSize.MEDIUM,
       ),
       credentials: rds.Credentials.fromUsername(
-        secret.secretValueFromJson("DB_Username").unsafeUnwrap(), // Admin username from imported secret
+        new CfnDynamicReference(
+          CfnDynamicReferenceService.SECRETS_MANAGER,
+          `${secret.secretArn}:SecretString:DB_Username::`,
+        ).toString(), // Admin username from imported secret
         {
           secretName: this.secretPathAdmin.secretName, // Store admin password in new secret
         },
@@ -177,10 +182,12 @@ export class DatabaseStack extends Stack {
       assumedBy: new iam.ServicePrincipal("rds.amazonaws.com"),
     });
 
-    // Grant permission for RDS Proxy to connect to databases
+    // Grant permission for RDS Proxy to connect to this database instance only
     rdsProxyRole.addToPolicy(
       new iam.PolicyStatement({
-        resources: ["*"],
+        resources: [
+          `arn:${this.partition}:rds-db:${this.region}:${this.account}:dbuser:${this.dbInstance.instanceResourceId}/*`,
+        ],
         actions: ["rds-db:connect"], // Allow database connections
       }),
     );

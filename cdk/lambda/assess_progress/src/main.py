@@ -8,6 +8,8 @@ from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
 
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
+
 # Set up logging and metrics for the Lambda function
 logger = Logger(service="AssessProgress")
 metrics = Metrics(namespace="LAIGO", service="AssessProgress")
@@ -21,6 +23,7 @@ TABLE_NAME_PARAM = os.environ["TABLE_NAME_PARAM"]
 BEDROCK_TEMP_PARAM = os.environ.get("BEDROCK_TEMP_PARAM")
 BEDROCK_TOP_P_PARAM = os.environ.get("BEDROCK_TOP_P_PARAM")
 BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
+MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]
 
 # AWS Clients
 secrets_manager_client = boto3.client("secretsmanager")
@@ -36,6 +39,7 @@ TABLE_NAME = None
 BEDROCK_TEMP = 0.0
 BEDROCK_TOP_P = 0.9
 BEDROCK_MAX_TOKENS = 512
+MESSAGE_LIMIT = None
 PLAYGROUND_TABLE_NAME = os.environ.get("PLAYGROUND_TABLE_NAME")
 
 
@@ -49,9 +53,39 @@ def _is_meta_model(model_id: str) -> bool:
     return model_id.startswith("meta.") or "meta" in model_id
 
 
+def _sampling_params_mode(model_id: str) -> str:
+    """Return which sampling params a model accepts: 'both', 'single', or 'none'.
+
+    - Meta/Llama and Claude 3.x accept both temperature and top_p.
+    - Claude 4.x (e.g. Sonnet 4.5/4.6) accept only ONE of temperature/top_p.
+    - Claude 5.x+ (e.g. Sonnet 5/5.5) accept NEITHER.
+    """
+    mid = (model_id or "").lower()
+    if not (("anthropic" in mid) or ("claude" in mid)):
+        return "both"
+    for fam in ("sonnet", "opus", "haiku", "fable"):
+        if f"claude-{fam}-5" in mid:
+            return "none"
+    for fam in ("sonnet", "opus", "haiku"):
+        if f"claude-{fam}-4" in mid:
+            return "single"
+    return "both"
+
+
+def _apply_sampling_params(body: dict, model_id: str, temperature, top_p) -> None:
+    """Add temperature/top_p to an InvokeModel body according to the model's rules."""
+    mode = _sampling_params_mode(model_id)
+    if mode == "both":
+        body["temperature"] = temperature
+        body["top_p"] = top_p
+    elif mode == "single":
+        body["temperature"] = temperature
+    # 'none': add neither
+
+
 def _build_invoke_body(model_id, system_instructions, human_context):
     if _is_anthropic_model(model_id):
-        return {
+        body = {
             "anthropic_version": "bedrock-2023-05-31",
             "system": system_instructions,
             "messages": [
@@ -66,9 +100,9 @@ def _build_invoke_body(model_id, system_instructions, human_context):
                 }
             ],
             "max_tokens": BEDROCK_MAX_TOKENS,
-            "temperature": BEDROCK_TEMP,
-            "top_p": BEDROCK_TOP_P,
         }
+        _apply_sampling_params(body, model_id, BEDROCK_TEMP, BEDROCK_TOP_P)
+        return body
 
     if _is_meta_model(model_id):
         # Llama 3 requires special chat template tokens for instruction following
@@ -420,7 +454,7 @@ def get_parameter(param_name, cached_var):
     return cached_var
 
 def initialize_constants():
-    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS
+    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS, MESSAGE_LIMIT
     try:
         BEDROCK_LLM_ID = get_parameter(BEDROCK_LLM_PARAM, BEDROCK_LLM_ID)
         TABLE_NAME = get_parameter(TABLE_NAME_PARAM, TABLE_NAME)
@@ -439,6 +473,10 @@ def initialize_constants():
             max_tokens_val = get_parameter(BEDROCK_MAX_TOKENS_PARAM, None)
             if max_tokens_val:
                 BEDROCK_MAX_TOKENS = int(max_tokens_val)
+
+        MESSAGE_LIMIT = get_parameter(MESSAGE_LIMIT_PARAM, MESSAGE_LIMIT)
+        if MESSAGE_LIMIT is None:
+            MESSAGE_LIMIT = "Infinity"
     except Exception as e:
         logger.exception("Failed to initialize constants")
         raise
@@ -469,14 +507,20 @@ def connect_to_db():
             'password': secret["password"],
             'host': RDS_PROXY_ENDPOINT,
             'port': secret["port"],
-            'sslmode': 'require'  # Require SSL connection
+            # Require TLS and verify the server certificate and hostname. The RDS
+            # Proxy presents a certificate from the public Amazon CA chain; point
+            # sslrootcert at the OS CA bundle (which contains the Amazon roots)
+            # rather than "system", which the psycopg binary wheel's bundled
+            # OpenSSL does not resolve to the container's trust store.
+            'sslmode': 'verify-full',
+            'sslrootcert': '/etc/pki/tls/certs/ca-bundle.crt'
         }
         connection_string = " ".join([f"{key}={value}" for key, value in connection_params.items()])
         connection = psycopg.connect(connection_string)
         logger.info("Successfully connected to database with SSL/TLS")
     except psycopg.OperationalError as e:
         logger.error(f"SSL/TLS connection failed: {e}")
-        logger.error(f"Connection details: host={RDS_PROXY_ENDPOINT}, port={secret['port']}, sslmode=require")
+        logger.error(f"Connection details: host={RDS_PROXY_ENDPOINT}, port={secret['port']}, sslmode=verify-full")
         if 'SSL' in str(e) or 'certificate' in str(e).lower():
             logger.error("SSL certificate validation failed. Verify RDS Proxy TLS configuration.")
         if connection:
@@ -595,8 +639,7 @@ def fetch_chat_history(session_id, table_name=None):
 
 def check_authorization(user_id, case_id):
     """
-    Verify that the user (identified by database user_id) owns the specified case 
-    or is an instructor for the case owner.
+    Verify that the user (identified by database user_id) owns the specified case.
     Prevents IDOR attacks by checking case ownership.
     
     Args:
@@ -614,19 +657,13 @@ def check_authorization(user_id, case_id):
         conn = connect_to_db()
         # Use context manager for automatic cursor cleanup
         with conn.cursor() as cursor:
-            # Single query to check both ownership and instructor relationship
+            # Assessment mutates case state, so only the case owner may proceed.
             query = """
                 SELECT 1 FROM "cases" c
                 WHERE c.case_id = %s
-                AND (
-                    c.student_id = %s
-                    OR EXISTS (
-                        SELECT 1 FROM instructor_students 
-                        WHERE instructor_id = %s AND student_id = c.student_id
-                    )
-                );
+                AND c.student_id = %s;
             """
-            cursor.execute(query, (case_id, user_id, user_id))
+            cursor.execute(query, (case_id, user_id))
             is_authorized = cursor.fetchone() is not None
             
             if is_authorized:
@@ -679,10 +716,11 @@ def get_cors_origin(event):
     """
     Resolve the CORS origin based on the ALLOWED_ORIGIN env var.
     Mirrors the Node.js getOriginHeader() in cdk/lambda/handlers/utils/utils.js.
+    Falls back to the local Vite dev-server origin when ALLOWED_ORIGIN is unset.
     """
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
     if not allowed_origin:
-        return "*"
+        return "http://localhost:5173"
 
     return allowed_origin
 
@@ -770,15 +808,65 @@ def handler(event, context):
     case_id = body.get("case_id")
     block_type = body.get("block_type")
     
-    # --- Playground mode: skip authorization, use DB history + inline prompt ---
+    # --- Playground mode: staff-only, uses DB history + inline prompt ---
     if body.get("playground_mode"):
+        # Defense-in-depth: the playground capability is restricted to staff
+        # (admin or instructor). Resolve roles from both transports:
+        #   - WebSocket: forwarded as event["callerRoles"]
+        #   - REST: provided by the authorizer at
+        #     event["requestContext"]["authorizer"]["roles"] as a JSON string
+        caller_roles = event.get("callerRoles", [])
+        if not isinstance(caller_roles, list):
+            caller_roles = []
+
+        authorizer_roles_raw = request_context.get("authorizer", {}).get("roles")
+        if authorizer_roles_raw:
+            try:
+                parsed_roles = json.loads(authorizer_roles_raw)
+                if isinstance(parsed_roles, list):
+                    caller_roles = caller_roles + parsed_roles
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        is_staff = "admin" in caller_roles or "instructor" in caller_roles
+        if not is_staff:
+            logger.warning(
+                "Unauthorized playground access — caller lacks admin/instructor role",
+                userId=event.get("userId") or request_context.get("authorizer", {}).get("principalId"),
+            )
+            error_msg = "Forbidden: Administrative access required"
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 403}
+            return create_response(403, error_msg, event)
+
+        # IDOR protection: resolve the authenticated caller's user_id and bind
+        # the playground session key to it. The staff-role check above only
+        # confirms the caller is an admin/instructor — without an ownership
+        # binding, the session key would be built entirely from client-supplied
+        # input, letting any staff user read another staff user's playground
+        # transcripts. user_id is sourced from the trusted boundary (the
+        # authorizer / WebSocket handler), never from the request body.
+        user_id = event.get("userId")
+        if not user_id:
+            user_id = request_context.get("authorizer", {}).get("principalId")
+        if not user_id:
+            logger.error("Authorization failed: Missing userId for playground assessment")
+            error_msg = "Unauthorized: Missing user identity"
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 401}
+            return create_response(401, error_msg, event)
+
         custom_prompt = body.get("custom_prompt", "")
         test_id = body.get("session_id", "")
         block_type = body.get("block_type", "intake")
         
-        # Construct unique session ID consistently with text_generation Lambda
-        # Pattern: playground-{test_id}-{block_type}
-        playground_session_id = f"playground-{test_id}-{block_type}"
+        # Construct unique session ID consistently with playground_generation
+        # Lambda. The user_id prefix namespaces the key per authenticated caller
+        # so staff users cannot read each other's playground sessions.
+        # Pattern: playground-{user_id}-{test_id}-{block_type}
+        playground_session_id = f"playground-{user_id}-{test_id}-{block_type}"
         
         logger.info(f"Playground assessment mode for block_type: {block_type}, test_id: {test_id}, session_id: {playground_session_id}")
         
@@ -811,7 +899,49 @@ def handler(event, context):
         CONVERSATION HISTORY PACKAGE:
         {assessment_context["formatted_context"]}
         """
-        
+
+        # Require the user to have accepted the legal/AI-use waiver before any
+        # AI feature runs — playground assessments are not exempt. Fails closed
+        # if the acceptance state cannot be read.
+        try:
+            conn = connect_to_db()
+            if not is_disclaimer_accepted(conn, user_id):
+                error_msg = "You must accept the disclaimer before using the AI assistant."
+                if is_websocket and connection_id:
+                    send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg, data={"code": "DISCLAIMER_NOT_ACCEPTED"})
+                    return {"statusCode": 200}
+                return create_response(403, {"error": error_msg, "code": "DISCLAIMER_NOT_ACCEPTED"}, event)
+        except Exception as e:
+            logger.error(f"Error checking disclaimer acceptance: {e}")
+            error_msg = "Service temporarily unavailable. Please try again later."
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 503}
+            return create_response(503, {"error": error_msg}, event)
+
+        # Enforce the daily message limit before invoking Bedrock so playground
+        # requests are metered like standard-mode requests. Counts as one
+        # message per request and fails closed if the usage check cannot run.
+        if MESSAGE_LIMIT != "Infinity":
+            try:
+                limit = int(MESSAGE_LIMIT)
+                conn = connect_to_db()
+                current_usage = check_and_increment_usage(conn, user_id)
+                logger.info(f"User {user_id} playground usage: {current_usage}/{limit}")
+                if current_usage > limit:
+                    error_msg = "Daily message limit reached. Please contact your administrator."
+                    if is_websocket and connection_id:
+                        send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                        return {"statusCode": 200}
+                    return create_response(429, {"error": error_msg}, event)
+            except Exception as e:
+                logger.error(f"Error checking message limit: {e}")
+                error_msg = "Service temporarily unavailable. Please try again later."
+                if is_websocket and connection_id:
+                    send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                    return {"statusCode": 503}
+                return create_response(503, {"error": error_msg}, event)
+
         try:
             start_time = time.time()
             result, response_text = _invoke_assessment_with_retry(system_instructions, human_context, max_attempts=2)
@@ -851,9 +981,9 @@ def handler(event, context):
         except Exception as e:
             logger.exception(f"Playground assessment error: {e}")
             if is_websocket and connection_id:
-                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=str(e))
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content="Internal server error")
                 return {"statusCode": 500}
-            return create_response(500, f"Internal server error: {str(e)}", event)
+            return create_response(500, "Internal server error", event)
     
     # --- Standard mode: requires case_id and authorization ---
     logger.info(f"Processing assessment for Case ID: {case_id}, Block Type: {block_type}")
@@ -911,7 +1041,47 @@ def handler(event, context):
     CONVERSATION HISTORY PACKAGE:
     {assessment_context["formatted_context"]}
     """
-    
+
+    # Require the user to have accepted the legal/AI-use waiver before any
+    # AI feature runs. Fails closed if the acceptance state cannot be read.
+    try:
+        conn = connect_to_db()
+        if not is_disclaimer_accepted(conn, user_id):
+            error_msg = "You must accept the disclaimer before using the AI assistant."
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg, data={"code": "DISCLAIMER_NOT_ACCEPTED"})
+                return {"statusCode": 200}
+            return create_response(403, {"error": error_msg, "code": "DISCLAIMER_NOT_ACCEPTED"}, event)
+    except Exception as e:
+        logger.error(f"Error checking disclaimer acceptance: {e}")
+        error_msg = "Service temporarily unavailable. Please try again later."
+        if is_websocket and connection_id:
+            send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+            return {"statusCode": 503}
+        return create_response(503, {"error": error_msg}, event)
+
+    # Enforce the daily message limit before invoking Bedrock. Counts as one
+    # message per request and fails closed if the usage check cannot complete.
+    if MESSAGE_LIMIT != "Infinity":
+        try:
+            limit = int(MESSAGE_LIMIT)
+            conn = connect_to_db()
+            current_usage = check_and_increment_usage(conn, user_id)
+            logger.info(f"User {user_id} usage: {current_usage}/{limit}")
+            if current_usage > limit:
+                error_msg = "Daily message limit reached. Please contact your administrator."
+                if is_websocket and connection_id:
+                    send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                    return {"statusCode": 200}
+                return create_response(429, {"error": error_msg}, event)
+        except Exception as e:
+            logger.error(f"Error checking message limit: {e}")
+            error_msg = "Service temporarily unavailable. Please try again later."
+            if is_websocket and connection_id:
+                send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=error_msg)
+                return {"statusCode": 503}
+            return create_response(503, {"error": error_msg}, event)
+
     try:
         logger.info(f"Invoking Bedrock model: {BEDROCK_LLM_ID}")
         start_time = time.time()
@@ -959,6 +1129,6 @@ def handler(event, context):
     except Exception as e:
         logger.exception(f"Unexpected error during assessment execution: {e}")
         if is_websocket and connection_id:
-            send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=str(e))
+            send_to_websocket(connection_id, ws_endpoint, request_id, "error", content="Internal server error")
             return {"statusCode": 500}
-        return create_response(500, f"Internal server error: {str(e)}", event)
+        return create_response(500, "Internal server error", event)

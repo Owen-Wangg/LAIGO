@@ -7,11 +7,15 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import { Construct } from "constructs";
 import { Duration } from "aws-cdk-lib";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import { VpcStack } from "./vpc-stack";
 import { DatabaseStack } from "./database-stack";
 import { applyStandardTags } from "./shared/tagging";
+import { isProdEnvironment } from "./shared/environment";
 import { Fn } from "aws-cdk-lib";
 import { Asset } from "aws-cdk-lib/aws-s3-assets";
 import * as s3 from "aws-cdk-lib/aws-s3";
@@ -29,13 +33,17 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as ses from "aws-cdk-lib/aws-ses";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 
 // Stack properties for API Gateway configuration
 interface ApiGatewayStackProps extends cdk.StackProps {
   ecrRepositories: { [key: string]: ecr.Repository }; // ECR repositories for Lambda Docker images
-  domainName?: string; // Optional custom domain for CORS origin lockdown and Amplify
+  domainName?: string; // Optional custom domain (host only) registered in Amplify and used as the CORS origin
+  frontendOrigin?: string; // Optional explicit frontend origin (full URL) for CORS lockdown without registering an Amplify custom domain
   sesVerifiedDomain?: string; // Optional SES verified domain for Cognito email (independent of domainName)
+  securityAlertEmail?: string; // Optional email address subscribed to the security-alerts SNS topic
 }
 
 /**
@@ -107,29 +115,55 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // Determine environment for conditional configuration
-    const isProd = this.node.tryGetContext("Environment") === "production";
+    const isProd = isProdEnvironment(this);
 
-    if (isProd && !props.domainName) {
+    // Compute the allowed CORS origin. A custom domain takes precedence and is
+    // expressed as an https origin; otherwise an explicit frontend origin (e.g.
+    // the Amplify-managed URL) is used verbatim with any trailing slash removed.
+    const allowedOrigin = props.domainName
+      ? `https://${props.domainName}`
+      : props.frontendOrigin
+        ? props.frontendOrigin.replace(/\/+$/, "")
+        : "";
+
+    // Validate that a configured origin is a single concrete https origin.
+    // This rejects wildcards, non-https schemes, comma-separated lists, paths,
+    // whitespace, and any characters that could break out of the YAML scalar
+    // the value is later spliced into — all of which would otherwise satisfy
+    // the emptiness-only production guard below.
+    if (allowedOrigin && !/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(allowedOrigin)) {
       throw new Error(
-        "DomainName context is required for production deployments so CORS is restricted to your frontend origin (pass -c DomainName=your.domain).",
+        `Invalid frontend origin "${allowedOrigin}". Provide a single concrete https origin, e.g. https://app.example.com (pass -c DomainName as a bare host, or -c FrontendOrigin as a full https URL).`,
+      );
+    }
+
+    if (isProd && !allowedOrigin) {
+      throw new Error(
+        "A frontend origin is required for production deployments so CORS is restricted. Pass -c DomainName=your.domain for a custom domain, or -c FrontendOrigin=https://main.xxxxx.amplifyapp.com to use the Amplify-managed domain.",
       );
     }
 
     // Initialize Lambda layers collection
     this.layerList = {};
 
-    // Compute allowed CORS origin from optional domainName prop
-    const allowedOrigin = props.domainName ? `https://${props.domainName}` : "";
+    // Local Vite dev-server origin used as the non-production CORS fallback.
+    // Production never reaches this fallback: the guard above throws when no
+    // origin is configured, so effectiveOrigin only resolves to localhost in
+    // non-production environments.
     const localDevOrigin = "http://localhost:5173";
+    const effectiveOrigin = allowedOrigin || localDevOrigin;
+
     const s3CorsAllowedOrigins = allowedOrigin
       ? isProd
         ? [allowedOrigin] // Production: only the real domain
         : [allowedOrigin, localDevOrigin] // Development: include localhost
-      : ["*"];
-    // Spread into each Lambda's environment when allowedOrigin is set
-    const corsEnv: { [key: string]: string } = allowedOrigin
-      ? { ALLOWED_ORIGIN: allowedOrigin }
-      : {};
+      : [localDevOrigin]; // Non-production fallback: local dev server only
+    // Spread into each Lambda's environment; always set so handlers never
+    // fall back to their own default. Resolves to the configured origin, or
+    // the local dev origin in non-production.
+    const corsEnv: { [key: string]: string } = {
+      ALLOWED_ORIGIN: effectiveOrigin,
+    };
 
     // Create Lambda layer for JWT verification (Node.js)
     const jwt = new lambda.LayerVersion(this, "aws-jwt-verify", {
@@ -320,6 +354,7 @@ export class ApiGatewayStack extends cdk.Stack {
       idTokenValidity: cdk.Duration.minutes(30),
       refreshTokenValidity: cdk.Duration.days(7), // Reduced from 30-day default; limits stolen refresh token window (AUTH-TL-01)
       enableTokenRevocation: true, // Explicit: ensures refresh token rotation and reuse detection (AUTH-TL-08)
+      preventUserExistenceErrors: true, // Return uniform authentication responses regardless of whether the account exists
     });
 
     // Create Cognito identity pool for AWS credential federation
@@ -376,20 +411,26 @@ export class ApiGatewayStack extends cdk.Stack {
       });
     };
 
-    // Load OpenAPI specification from file
-    // The spec uses Fn::Sub with ${CorsAllowedOrigin} for Access-Control-Allow-Origin.
-    // A CfnParameter supplies the value at deploy time via AWS::Include resolution.
-    const corsOriginParam = new cdk.CfnParameter(this, "CorsAllowedOrigin", {
-      type: "String",
-      default: "*",
-      description: "Value for Access-Control-Allow-Origin in API Gateway MOCK responses",
-    });
-    if (allowedOrigin) {
-      corsOriginParam.default = allowedOrigin;
-    }
+    // Load the OpenAPI specification and resolve the Access-Control-Allow-Origin
+    // placeholder at synth time. The spec references ${CorsAllowedOrigin} in its
+    // CORS response headers; substituting the concrete origin here keeps the
+    // deployed value in lockstep with the synthesized stack. Falls back to the
+    // local dev-server origin when no origin is configured (non-production
+    // without a frontend origin).
+    const corsOriginValue = effectiveOrigin;
+    const specPath = "OpenAPI_Swagger_Definition.yaml";
+    const resolvedSpec = fs
+      .readFileSync(specPath, "utf8")
+      .split("${CorsAllowedOrigin}")
+      .join(corsOriginValue);
+    const resolvedSpecPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "laigo-openapi-")),
+      "OpenAPI_Swagger_Definition.yaml",
+    );
+    fs.writeFileSync(resolvedSpecPath, resolvedSpec);
 
     const asset = new Asset(this, "SampleAsset", {
-      path: "OpenAPI_Swagger_Definition.yaml",
+      path: resolvedSpecPath,
     });
 
     // Transform OpenAPI spec for API Gateway (resolves CloudFormation intrinsic functions)
@@ -415,7 +456,7 @@ export class ApiGatewayStack extends cdk.Stack {
       deployOptions: {
         stageName: "prod", // Production stage
         loggingLevel: apigateway.MethodLoggingLevel.ERROR, // Log errors only
-        dataTraceEnabled: !isProd, // Dev only — avoids logging legal case content / PII in prod
+        dataTraceEnabled: false, // Never log full request/response bodies (legal case content / PII)
         metricsEnabled: true, // Enable CloudWatch metrics
         accessLogDestination: new apigateway.LogGroupLogDestination(
           accessLogGroup,
@@ -534,6 +575,57 @@ export class ApiGatewayStack extends cdk.Stack {
             metricName: "PerUserRateLimit",
           },
         },
+        {
+          // SQL injection protection for request parameters, body, and headers
+          name: "AWS-AWSManagedRulesSQLiRuleSet",
+          priority: 4,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesSQLiRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesSQLiRuleSet",
+          },
+        },
+        {
+          // Blocks request patterns known to be invalid or associated with exploits
+          name: "AWS-AWSManagedRulesKnownBadInputsRuleSet",
+          priority: 5,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesKnownBadInputsRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesKnownBadInputsRuleSet",
+          },
+        },
+        {
+          // Blocks sources on the Amazon threat-intelligence IP reputation list
+          name: "AWS-AWSManagedRulesAmazonIpReputationList",
+          priority: 6,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesAmazonIpReputationList",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "AWS-AWSManagedRulesAmazonIpReputationList",
+          },
+        },
       ],
       customResponseBodies: {
         "rate-limited": {
@@ -572,6 +664,8 @@ export class ApiGatewayStack extends cdk.Stack {
           arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
         }),
       ],
+      // Keep bearer tokens out of request logs
+      redactedFields: [{ singleHeader: { Name: "authorization" } }],
     });
 
     // Create single IAM role for all authenticated users
@@ -782,9 +876,11 @@ export class ApiGatewayStack extends cdk.Stack {
     );
 
     // Grant API Gateway permission to invoke the admin authorizer
-    adminAuthorizationFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    adminAuthorizationFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/authorizers/*`,
+    });
 
     // Override logical ID to match OpenAPI specification reference
     const apiGW_adminAuthorizationFunction = adminAuthorizationFunction.node
@@ -821,9 +917,11 @@ export class ApiGatewayStack extends cdk.Stack {
     db.dbInstance.grantConnect(studentAuthFunction, "applicationUsername");
 
     // Grant API Gateway permission to invoke the student authorizer
-    studentAuthFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    studentAuthFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/authorizers/*`,
+    });
 
     // Override logical ID to match OpenAPI specification reference
     const apiGW_studentauthorizationFunction = studentAuthFunction.node
@@ -862,9 +960,11 @@ export class ApiGatewayStack extends cdk.Stack {
     db.dbInstance.grantConnect(instructorAuthFunction, "applicationUsername");
 
     // Grant API Gateway permission to invoke the instructor authorizer
-    instructorAuthFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    instructorAuthFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/authorizers/*`,
+    });
 
     // Override logical ID to match OpenAPI specification reference
     const apiGW_instructorAuthorizationFunction = instructorAuthFunction.node
@@ -881,18 +981,6 @@ export class ApiGatewayStack extends cdk.Stack {
 
     // Grant access to specific database secret (Application User)
     db.secretPathUser.grantRead(cognitoRole);
-
-    // Grant permission to add users to an IAM group
-    cognitoRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["iam:AddUserToGroup"],
-        resources: [
-          `arn:aws:iam::${this.account}:user/*`,
-          `arn:aws:iam::${this.account}:group/*`,
-        ],
-      }),
-    );
 
     // Grant access to EC2 for Cognito Lambda triggers (VPC Lambda execution)
     cognitoRole.addToPolicy(
@@ -923,20 +1011,15 @@ export class ApiGatewayStack extends cdk.Stack {
       }),
     );
 
-    // Policy to allow Cognito admin actions for user group management
-    const adminAddUserToGroupPolicy = new iam.Policy(
+    // Policy to allow the post-confirmation trigger to read Cognito user attributes
+    const adminGetUserPolicy = new iam.Policy(
       this,
-      `${id}-AdminAddUserToGroupPolicy`,
+      `${id}-CognitoAdminGetUserPolicy`,
       {
         statements: [
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
-            actions: [
-              "cognito-idp:AdminAddUserToGroup",
-              "cognito-idp:AdminRemoveUserFromGroup",
-              "cognito-idp:AdminGetUser",
-              "cognito-idp:AdminListGroupsForUser",
-            ],
+            actions: ["cognito-idp:AdminGetUser"],
             resources: [
               `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${this.userPool.userPoolId}`,
             ],
@@ -945,13 +1028,16 @@ export class ApiGatewayStack extends cdk.Stack {
       },
     );
     // Attach the inline policy to the role
-    cognitoRole.attachInlinePolicy(adminAddUserToGroupPolicy);
+    cognitoRole.attachInlinePolicy(adminGetUserPolicy);
 
-    // Grant access to SSM parameters for allowed email domains
+    // Grant access to the specific SSM parameters the signup triggers read
     cognitoRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/*`],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/LAIGO/AllowedEmailDomains`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/LAIGO/SignupMode`,
+        ],
       }),
     );
 
@@ -1120,8 +1206,11 @@ export class ApiGatewayStack extends cdk.Stack {
 
     const defaultBedrockModelOptions = [
       {
-        label: "Claude Sonnet 5",
-        value: `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5`,
+        label: "Claude Sonnet 5.5",
+        value: `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5-5`,
+        // NOTE: Claude 5.x ignores temperature/top_p (the backend omits them for
+        // this family). Ranges are kept so the admin UI renders; the sliders are
+        // effectively inert for this model.
         constraints: {
           maxOutputTokens: 128000,
           defaultMaxOutputTokens: 4096,
@@ -1443,7 +1532,7 @@ export class ApiGatewayStack extends cdk.Stack {
       {
         parameterName: "/LAIGO/SignupMode",
         description: "Controls signup access: 'public' allows all, 'whitelist' restricts to email_whitelist table",
-        stringValue: "public",
+        stringValue: isProd ? "whitelist" : "public",
       },
     );
 
@@ -1503,9 +1592,11 @@ export class ApiGatewayStack extends cdk.Stack {
     );
 
     // Allow API Gateway to invoke the student cases lambda
-    lambdaStudentFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    lambdaStudentFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/*/*/student*`,
+    });
     messageLimitParameter.grantRead(lambdaStudentFunction);
     fileSizeLimitParameter.grantRead(lambdaStudentFunction);
     caseTypesParameter.grantRead(lambdaStudentFunction);
@@ -1695,16 +1786,40 @@ export class ApiGatewayStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
       resources: [
-        // Anthropic Claude models (foundation models)
+        // Anthropic Claude models (foundation models, local region)
         `arn:aws:bedrock:${this.region}::foundation-model/anthropic.*`,
-        // Meta Llama models (foundation models)
+        // Meta Llama models (foundation models, local region)
         `arn:aws:bedrock:${this.region}::foundation-model/meta.*`,
         // Cross-region inference profiles (Anthropic)
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.*`,
         // Cross-region inference profiles (Meta)
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.meta.*`,
+        // Invoking a "us." cross-region inference profile fans the request out to
+        // the underlying foundation models in the US regions the profile spans
+        // (us-east-1 / us-east-2 / us-west-2). bedrock:InvokeModel must therefore
+        // be allowed on those foundation-model ARNs too, or Bedrock returns
+        // AccessDeniedException for the destination region (e.g. us-east-1).
+        // See: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
+        ...["us-east-1", "us-east-2", "us-west-2"].flatMap((r) => [
+          `arn:aws:bedrock:${r}::foundation-model/anthropic.*`,
+          `arn:aws:bedrock:${r}::foundation-model/meta.*`,
+        ]),
       ],
     });
+
+    // Per-function reserved concurrency ceilings for the compute- and Bedrock-
+    // intensive functions. Reserving a ceiling bounds how much of the account's
+    // shared concurrency pool any single function can consume, so a spike or
+    // runaway invocation on one cannot starve the others. Environment-aware;
+    // tune as real traffic patterns emerge.
+    const reservedConcurrency = {
+      textGen: isProd ? 50 : 10,
+      playground: isProd ? 30 : 5,
+      caseGen: isProd ? 25 : 5,
+      audioToText: isProd ? 25 : 5,
+      assessProgress: isProd ? 20 : 5,
+      summaryGeneration: isProd ? 20 : 5,
+    };
 
     const caseGenLambdaDockerFunc = new lambda.Function(
       this,
@@ -1716,6 +1831,7 @@ export class ApiGatewayStack extends cdk.Stack {
         layers: [psycopg3Layer, powertoolsLayer, bedrockClientLayer],
         memorySize: 512,
         timeout: cdk.Duration.seconds(30),
+        reservedConcurrentExecutions: reservedConcurrency.caseGen,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -1734,6 +1850,7 @@ export class ApiGatewayStack extends cdk.Stack {
           TABLE_NAME: `${id}-Conversation-Table`,
           GUARDRAIL_ID: textGenGuardrail.attrGuardrailId,
           GUARDRAIL_VERSION: textGenGuardrailVersion.attrVersion,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
@@ -1777,6 +1894,7 @@ export class ApiGatewayStack extends cdk.Stack {
           bedrockTopPParameter.parameterArn,
           bedrockMaxTokensParameter.parameterArn,
           caseTypesParameter.parameterArn,
+          messageLimitParameter.parameterArn,
         ],
       }),
     );
@@ -1788,11 +1906,12 @@ export class ApiGatewayStack extends cdk.Stack {
         code: lambda.DockerImageCode.fromEcr(
           props.ecrRepositories["textGeneration"],
           {
-            tagOrDigest: "latest", // or whatever tag you're using
+            tagOrDigest: "bootstrap", // Cold-create only; pipeline pins the digest per run
           },
         ),
         memorySize: 1024,
         timeout: cdk.Duration.seconds(120),
+        reservedConcurrentExecutions: reservedConcurrency.textGen,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -1870,11 +1989,12 @@ export class ApiGatewayStack extends cdk.Stack {
         code: lambda.DockerImageCode.fromEcr(
           props.ecrRepositories["playgroundGeneration"],
           {
-            tagOrDigest: "latest",
+            tagOrDigest: "bootstrap", // Cold-create only; pipeline pins the digest per run
           },
         ),
         memorySize: 1024,
         timeout: cdk.Duration.seconds(120),
+        reservedConcurrentExecutions: reservedConcurrency.playground,
         vpc: vpcStack.vpc,
         functionName: `${id}-PlaygroundTextGenLambdaDockerFunction`,
         tracing: lambda.Tracing.ACTIVE,
@@ -1953,6 +2073,7 @@ export class ApiGatewayStack extends cdk.Stack {
         functionName: `${id}-AssessProgressFunction`,
         timeout: Duration.seconds(30),
         memorySize: 1024,
+        reservedConcurrentExecutions: reservedConcurrency.assessProgress,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -1968,6 +2089,7 @@ export class ApiGatewayStack extends cdk.Stack {
           BEDROCK_MAX_TOKENS_PARAM: bedrockMaxTokensParameter.parameterName,
           TABLE_NAME: `${id}-Conversation-Table`,
           PLAYGROUND_TABLE_NAME: playgroundTable.tableName,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
@@ -2008,6 +2130,7 @@ export class ApiGatewayStack extends cdk.Stack {
           bedrockTemperatureParameter.parameterArn,
           bedrockTopPParameter.parameterArn,
           bedrockMaxTokensParameter.parameterArn,
+          messageLimitParameter.parameterArn,
         ],
       }),
     );
@@ -2057,16 +2180,24 @@ export class ApiGatewayStack extends cdk.Stack {
         code: lambda.Code.fromAsset("lambda/generatePreSignedURL"),
         handler: "generatePreSignedURL.lambda_handler",
         timeout: Duration.seconds(29),
-        memorySize: 128,
+        memorySize: 512,
+        vpc: vpcStack.vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [dbClientSg],
         environment: {
           BUCKET: audioStorageBucket.bucketName,
           REGION: this.region,
+          SM_DB_CREDENTIALS: db.secretPathUser.secretName,
+          RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
           ...corsEnv,
         },
         functionName: `${id}-GeneratePreSignedURLFunction`,
-        layers: [powertoolsLayer],
+        layers: [psycopg3Layer, powertoolsLayer],
       },
     );
+
+    // Grant access to the student database secret for ownership resolution
+    db.secretPathUser.grantRead(generatePreSignedURL);
 
     // Override the Logical ID of the Lambda Function to get ARN in OpenAPI
     const cfnGeneratePreSignedURL = generatePreSignedURL.node
@@ -2099,6 +2230,7 @@ export class ApiGatewayStack extends cdk.Stack {
         layers: [psycopg3Layer, powertoolsLayer],
         memorySize: 1024,
         timeout: cdk.Duration.seconds(120),
+        reservedConcurrentExecutions: reservedConcurrency.audioToText,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -2198,6 +2330,7 @@ export class ApiGatewayStack extends cdk.Stack {
         functionName: `${id}-SummaryGenerationFunction`,
         timeout: Duration.seconds(120),
         memorySize: 1024,
+        reservedConcurrentExecutions: reservedConcurrency.summaryGeneration,
         vpc: vpcStack.vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         securityGroups: [dbClientSg],
@@ -2212,6 +2345,7 @@ export class ApiGatewayStack extends cdk.Stack {
           BEDROCK_TOP_P_PARAM: bedrockTopPParameter.parameterName,
           BEDROCK_MAX_TOKENS_PARAM: bedrockMaxTokensParameter.parameterName,
           TABLE_NAME: `${id}-Conversation-Table`,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
@@ -2241,6 +2375,7 @@ export class ApiGatewayStack extends cdk.Stack {
           bedrockTemperatureParameter.parameterArn,
           bedrockTopPParameter.parameterArn,
           bedrockMaxTokensParameter.parameterArn,
+          messageLimitParameter.parameterArn,
         ],
       }),
     );
@@ -2621,15 +2756,12 @@ export class ApiGatewayStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(notificationServiceFunction)],
     });
 
-    // Grant EventBridge permission to invoke notification service
-    notificationServiceFunction.grantInvoke(
-      new iam.ServicePrincipal("events.amazonaws.com"),
-    );
-
     // Grant API Gateway permission to invoke the notification service
-    notificationServiceFunction.grantInvoke(
-      new iam.ServicePrincipal("apigateway.amazonaws.com"),
-    );
+    notificationServiceFunction.addPermission("AllowApiGatewayInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/*/*/student/notifications*`,
+    });
 
     // Grant EventBridge permissions for instructor function feedback notifications
     lambdaInstructorFunction.addToRolePolicy(
@@ -2649,18 +2781,34 @@ export class ApiGatewayStack extends cdk.Stack {
     // Custom Resource for Bedrock Logging
     const bedrockLoggingRole = new iam.Role(this, `${id}-BedrockLoggingRole`, {
       assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com"),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName("CloudWatchLogsFullAccess"),
-      ],
     });
 
     const bedrockLogGroup = new logs.LogGroup(
       this,
       `${id}-BedrockModelInvocations`,
       {
-        retention: logs.RetentionDays.ONE_MONTH,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        retention: isProd
+          ? logs.RetentionDays.THREE_MONTHS
+          : logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
       },
+    );
+
+    // Scope the Bedrock logging role to only this log group (least privilege)
+    bedrockLoggingRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        resources: [
+          bedrockLogGroup.logGroupArn,
+          cdk.Stack.of(this).formatArn({
+            service: "logs",
+            resource: "log-group",
+            resourceName: `${bedrockLogGroup.logGroupName}:log-stream:*`,
+            arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+          }),
+        ],
+      }),
     );
 
     const enableBedrockLogging = new cr.AwsCustomResource(
@@ -2676,7 +2824,7 @@ export class ApiGatewayStack extends cdk.Stack {
                 logGroupName: bedrockLogGroup.logGroupName,
                 roleArn: bedrockLoggingRole.roleArn,
               },
-              textDataDeliveryEnabled: true,
+              textDataDeliveryEnabled: false,
               imageDataDeliveryEnabled: false,
               embeddingDataDeliveryEnabled: false,
             },
@@ -2692,7 +2840,7 @@ export class ApiGatewayStack extends cdk.Stack {
                 logGroupName: bedrockLogGroup.logGroupName,
                 roleArn: bedrockLoggingRole.roleArn,
               },
-              textDataDeliveryEnabled: true,
+              textDataDeliveryEnabled: false,
               imageDataDeliveryEnabled: false,
               embeddingDataDeliveryEnabled: false,
             },
@@ -2730,8 +2878,32 @@ export class ApiGatewayStack extends cdk.Stack {
       displayName: "LAIGO Security Alerts",
     });
 
+    // Subscribe an email endpoint when one is supplied; otherwise the topic ARN
+    // output below remains the manual-subscription fallback.
+    if (props.securityAlertEmail && props.securityAlertEmail.trim().length > 0) {
+      const email = props.securityAlertEmail.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new Error(
+          `securityAlertEmail must be a valid email address, got: ${email}`,
+        );
+      }
+      securityAlertsTopic.addSubscription(
+        new subscriptions.EmailSubscription(email),
+      );
+    }
+
+    const snsAlarmAction = new cloudwatchActions.SnsAction(securityAlertsTopic);
+
+    // Allow the admin function to publish notifications about admin role
+    // changes to the security alerts topic, scoped to this topic only.
+    securityAlertsTopic.grantPublish(lambdaAdminFunction);
+    lambdaAdminFunction.addEnvironment(
+      "SECURITY_ALERTS_TOPIC_ARN",
+      securityAlertsTopic.topicArn,
+    );
+
     // WAF Blocked Requests Alarm (API Gateway)
-    new cloudwatch.Alarm(this, `${id}-WafApiBlockedSpike`, {
+    const wafApiBlockedSpikeAlarm = new cloudwatch.Alarm(this, `${id}-WafApiBlockedSpike`, {
       metric: new cloudwatch.Metric({
         namespace: "AWS/WAFV2",
         metricName: "BlockedRequests",
@@ -2749,9 +2921,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "WAF API Gateway blocked request spike - possible active attack",
       alarmName: `${id}-waf-api-blocked-spike`,
     });
+    wafApiBlockedSpikeAlarm.addAlarmAction(snsAlarmAction);
 
     // WAF Rate Limit Triggers Alarm
-    new cloudwatch.Alarm(this, `${id}-WafRateLimitTriggers`, {
+    const wafRateLimitTriggersAlarm = new cloudwatch.Alarm(this, `${id}-WafRateLimitTriggers`, {
       metric: new cloudwatch.Metric({
         namespace: "AWS/WAFV2",
         metricName: "BlockedRequests",
@@ -2769,9 +2942,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "Multiple IPs hitting WAF rate limit - possible coordinated attack",
       alarmName: `${id}-waf-rate-limit-spike`,
     });
+    wafRateLimitTriggersAlarm.addAlarmAction(snsAlarmAction);
 
     // Per-User Rate Limit Alarm
-    new cloudwatch.Alarm(this, `${id}-WafPerUserRateLimit`, {
+    const wafPerUserRateLimitAlarm = new cloudwatch.Alarm(this, `${id}-WafPerUserRateLimit`, {
       metric: new cloudwatch.Metric({
         namespace: "AWS/WAFV2",
         metricName: "BlockedRequests",
@@ -2789,9 +2963,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "Multiple users hitting per-user rate limit - possible credential stuffing",
       alarmName: `${id}-waf-per-user-rate-spike`,
     });
+    wafPerUserRateLimitAlarm.addAlarmAction(snsAlarmAction);
 
     // API Gateway 5XX Error Alarm
-    new cloudwatch.Alarm(this, `${id}-Api5xxAlarm`, {
+    const api5xxAlarm = new cloudwatch.Alarm(this, `${id}-Api5xxAlarm`, {
       metric: this.api.metricServerError({
         statistic: "Sum",
         period: cdk.Duration.minutes(5),
@@ -2802,9 +2977,10 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "API Gateway 5XX error spike - backend failures",
       alarmName: `${id}-api-5xx-spike`,
     });
+    api5xxAlarm.addAlarmAction(snsAlarmAction);
 
     // API Gateway 4XX Error Alarm  
-    new cloudwatch.Alarm(this, `${id}-Api4xxAlarm`, {
+    const api4xxAlarm = new cloudwatch.Alarm(this, `${id}-Api4xxAlarm`, {
       metric: this.api.metricClientError({
         statistic: "Sum",
         period: cdk.Duration.minutes(5),
@@ -2815,6 +2991,7 @@ export class ApiGatewayStack extends cdk.Stack {
       alarmDescription: "API Gateway 4XX error spike - possible auth bypass attempts",
       alarmName: `${id}-api-4xx-spike`,
     });
+    api4xxAlarm.addAlarmAction(snsAlarmAction);
 
     // Security Dashboard
     new cloudwatch.Dashboard(this, `${id}-SecurityDashboard`, {

@@ -41,15 +41,45 @@ def _is_meta_model(model_id: str) -> bool:
     return model_id.startswith("meta.") or "meta" in model_id
 
 
+def _sampling_params_mode(model_id: str) -> str:
+    """Return which sampling params a model accepts: 'both', 'single', or 'none'.
+
+    - Meta/Llama and Claude 3.x accept both temperature and top_p.
+    - Claude 4.x (e.g. Sonnet 4.5/4.6) accept only ONE of temperature/top_p.
+    - Claude 5.x+ (e.g. Sonnet 5/5.5) accept NEITHER.
+    """
+    mid = (model_id or "").lower()
+    if not (("anthropic" in mid) or ("claude" in mid)):
+        return "both"
+    for fam in ("sonnet", "opus", "haiku", "fable"):
+        if f"claude-{fam}-5" in mid:
+            return "none"
+    for fam in ("sonnet", "opus", "haiku"):
+        if f"claude-{fam}-4" in mid:
+            return "single"
+    return "both"
+
+
+def _apply_sampling_params(body: dict, model_id: str, temperature, top_p) -> None:
+    """Add temperature/top_p to an InvokeModel body according to the model's rules."""
+    mode = _sampling_params_mode(model_id)
+    if mode == "both":
+        body["temperature"] = temperature
+        body["top_p"] = top_p
+    elif mode == "single":
+        body["temperature"] = temperature
+    # 'none': add neither
+
+
 def _build_request_payload(model_id: str, prompt: str, temperature: float, max_tokens: int, top_p: Optional[float]) -> dict:
     if _is_anthropic_model(model_id):
-        return {
+        body = {
             "anthropic_version": "bedrock-2023-05-31",
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
             "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
         }
+        _apply_sampling_params(body, model_id, temperature, top_p)
+        return body
 
     if _is_meta_model(model_id):
         # Llama 3 requires special chat template tokens for instruction following

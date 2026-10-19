@@ -36,7 +36,7 @@ BEDROCK_MAX_TOKENS = 2048
 def get_cors_origin(event):
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
     if not allowed_origin:
-        return "*"
+        return "http://localhost:5173"
     return allowed_origin
 
 def create_response(status_code, body, event=None):
@@ -144,9 +144,21 @@ def handler(event, context):
     
     playground_block_type = body.get("block_type", "intake") # Default
     
-    # Construct unique session ID based on playground marker, session_id and block_type
+    # IDOR protection: bind the playground session key to the authenticated
+    # caller so stored transcripts are namespaced per user. user_id comes from
+    # the trusted boundary (WebSocket handler / authorizer), never the body.
+    # This must stay consistent with the assess_progress reader, which
+    # reconstructs the key as playground-{user_id}-{session_id}-{block_type}.
+    user_id = event.get("userId")
+    if not user_id:
+        user_id = request_context.get("authorizer", {}).get("principalId")
+    if not user_id:
+        logger.error("Authorization failed: Missing userId for playground generation")
+        return create_response(401, {"error": "Unauthorized: Missing user identity"}, event)
+
+    # Construct unique session ID based on playground marker, user_id, session_id and block_type
     session_id = body.get("session_id", str(uuid.uuid4())[:8])
-    playground_session_id = f"playground-{session_id}-{playground_block_type}"
+    playground_session_id = f"playground-{user_id}-{session_id}-{playground_block_type}"
     
     # Custom model configuration (override defaults)
     custom_model_id = body.get("model_id", BEDROCK_LLM_ID)

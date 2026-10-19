@@ -54,19 +54,25 @@ function buildAuthResponse(principalId, effect, resource, context) {
 // Caches JWKS (JSON Web Key Set) to avoid fetching on every invocation
 let jwtVerifier;
 
-// User metadata cache for Lambda execution context
-// Avoids repeated database queries within the same invocation
+// User metadata cache for the warm Lambda execution context.
+// Entries carry an expiry so that role changes in the database become
+// effective within a bounded window instead of persisting for the full
+// lifetime of a warm container. Kept in line with the API Gateway authorizer
+// result cache (authorizerResultTtlInSeconds: 60).
+const USER_METADATA_CACHE_TTL_MS = 60 * 1000;
 let userMetadataCache = {};
 
 /**
- * Query database to resolve idpId to userId and retrieve user metadata
- * Implements execution context caching to avoid repeated queries
+ * Query database to resolve idpId to userId and retrieve user metadata.
+ * Caches results across invocations with a bounded TTL so revoked roles stop
+ * being honored once the entry expires.
  */
 async function getUserMetadataFromDatabase(idpId, forceRefresh = false) {
-  // Check cache first
-  if (!forceRefresh && userMetadataCache[idpId]) {
+  // Serve from cache only when the entry has not expired.
+  const cached = userMetadataCache[idpId];
+  if (!forceRefresh && cached && Date.now() < cached.expiresAt) {
     logger.info("Using cached user metadata");
-    return userMetadataCache[idpId];
+    return cached.user;
   }
 
   // Ensure database connection is initialized
@@ -96,8 +102,11 @@ async function getUserMetadataFromDatabase(idpId, forceRefresh = false) {
       roles: result[0].roles,
     };
 
-    // Cache for this execution context
-    userMetadataCache[idpId] = user;
+    // Cache with a bounded expiry so stale roles cannot outlive the TTL.
+    userMetadataCache[idpId] = {
+      user,
+      expiresAt: Date.now() + USER_METADATA_CACHE_TTL_MS,
+    };
 
     return user;
   } catch (error) {
@@ -231,9 +240,36 @@ exports.handler = async (event) => {
       }
     }
 
-    // Use a scoped wildcard to allow caching across all endpoints within this role's scope
-    // This allows the authorizer to be cached while ensuring the policy doesn't leak access to other roles.
-    const resource = parts.slice(0, 2).join("/") + "/*/student/*";
+    // Build the IAM policy resource to match exactly what admitted this caller.
+    // The TOKEN authorizer result is cached per token for the configured TTL and
+    // reused across method ARNs, so the resource must never grant more than the
+    // per-route decision above.
+    const base = parts.slice(0, 2).join("/");
+
+    // Map a "METHOD /path" route key to its concrete method ARN.
+    const toRouteArn = (routeKey) => {
+      const spaceIndex = routeKey.indexOf(" ");
+      const routeMethod = routeKey.slice(0, spaceIndex);
+      const path = routeKey.slice(spaceIndex + 1);
+      return `${base}/${routeMethod}${path}`;
+    };
+
+    let resource;
+    if (hasStudentRole) {
+      // Student role holders are entitled to the whole /student/* scope;
+      // handlers enforce object-level ownership. A scoped wildcard keeps the
+      // cached result usable across all of this role's endpoints.
+      resource = `${base}/*/student/*`;
+    } else {
+      // Non-students were admitted only via the shared or instructor-case
+      // allowlists. Grant exactly those routes so the cached policy cannot be
+      // reused to reach any other /student/* operation.
+      const allowedRoutes = [...sharedRoutes];
+      if (hasInstructorRole) {
+        allowedRoutes.push(...instructorCaseRoutes);
+      }
+      resource = allowedRoutes.map(toRouteArn);
+    }
 
     // Build fresh IAM policy per invocation (no shared mutable state)
     return buildAuthResponse(user.user_id, "Allow", resource, {

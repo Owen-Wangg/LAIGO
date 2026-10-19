@@ -67,20 +67,22 @@ exports.handler = async (event) => {
     const emailDomain = parts.slice(1).join("@").trim().toLowerCase();
     logger.info("Signup request", { emailDomain });
 
-    const isDomainAllowed = allowedDomains.some((allowed) => {
-      if (allowed === "*") return true;
-      return allowed === emailDomain;
-    });
-
-    // Guard: wildcard domain bypass should not be active in production (AUTH-CT-05)
+    // A wildcard ("*") entry would admit every email domain, which defeats the
+    // purpose of the allowlist. Treat it as a misconfiguration and fail closed:
+    // block all signups until the allowlist is corrected rather than silently
+    // granting every domain access to self-registration.
     if (allowedDomains.includes("*")) {
-      const environment = process.env.ENVIRONMENT || "production";
-      if (environment === "production") {
-        logger.error("CRITICAL: Wildcard domain allowlist detected in production");
-      } else {
-        logger.warn("Wildcard domain allowlist active — all domains permitted", { environment });
-      }
+      logger.error(
+        "Wildcard ('*') present in email domain allowlist; blocking signup until the allowlist is corrected",
+      );
+      throw new Error(
+        "Signup is temporarily unavailable due to a configuration issue. Please contact an administrator.",
+      );
     }
+
+    const isDomainAllowed = allowedDomains.some(
+      (allowed) => allowed === emailDomain,
+    );
 
     if (!isDomainAllowed) {
       logger.error("Domain not allowed", { emailDomain, allowedDomains });

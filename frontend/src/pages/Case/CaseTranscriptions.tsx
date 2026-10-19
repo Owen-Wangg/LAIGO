@@ -87,7 +87,7 @@ const CaseTranscriptions: React.FC = () => {
 
   // Set up WebSocket connection (same hook as CaseSummaries, InterviewAssistant, etc.)
   const { sendStreamingRequest, isConnected } = useWebSocket(wsUrl, {
-    protocols: token ? [token] : undefined,
+    protocols: token ? [token, "chat.v1"] : undefined,
   });
 
   // Initialize WebSocket URL when auth is available
@@ -112,7 +112,7 @@ const CaseTranscriptions: React.FC = () => {
       const token = tokens?.idToken?.toString();
       if (!token) return;
       const response = await fetch(
-        `${import.meta.env.VITE_API_ENDPOINT}student/file_size_limit`,
+        `${import.meta.env.VITE_API_ENDPOINT}/student/file_size_limit`,
         {
           method: "GET",
           headers: {
@@ -138,7 +138,7 @@ const CaseTranscriptions: React.FC = () => {
       const response = await fetch(
         `${
           import.meta.env.VITE_API_ENDPOINT
-        }student/get_transcriptions?case_id=${caseId}`,
+        }/student/get_transcriptions?case_id=${caseId}`,
         {
           method: "GET",
           headers: {
@@ -165,7 +165,7 @@ const CaseTranscriptions: React.FC = () => {
         const response = await fetch(
           `${
             import.meta.env.VITE_API_ENDPOINT
-          }student/case_page?case_id=${caseId}`,
+          }/student/case_page?case_id=${caseId}`,
           {
             method: "GET",
             headers: {
@@ -201,7 +201,7 @@ const CaseTranscriptions: React.FC = () => {
     if (!token) throw new Error("No token");
 
     const response = await fetch(
-      `${import.meta.env.VITE_API_ENDPOINT}student/generate_presigned_url?` +
+      `${import.meta.env.VITE_API_ENDPOINT}/student/generate_presigned_url?` +
         `audio_file_id=${encodeURIComponent(audioFileId)}&` +
         `file_name=${encodeURIComponent(fileName)}&` +
         `file_type=${encodeURIComponent(fileType)}`,
@@ -226,7 +226,7 @@ const CaseTranscriptions: React.FC = () => {
     const s3FilePath = `${audioFileId}/${fileName}`;
 
     const response = await fetch(
-      `${import.meta.env.VITE_API_ENDPOINT}student/initialize_audio_file?` +
+      `${import.meta.env.VITE_API_ENDPOINT}/student/initialize_audio_file?` +
         `audio_file_id=${encodeURIComponent(audioFileId)}&` +
         `s3_file_path=${encodeURIComponent(s3FilePath)}&` +
         `case_id=${encodeURIComponent(caseId || "")}&` +
@@ -242,10 +242,23 @@ const CaseTranscriptions: React.FC = () => {
     return data;
   };
 
-  const uploadFile = async (file: File, presignedUrl: string) => {
+  // Maps the normalized file type (mp3/wav/m4a) to the exact MIME type the
+  // backend uses to sign the presigned URL. The Content-Type sent on the PUT
+  // must match the signed ContentType, otherwise S3 rejects it with a 403.
+  const NORMALIZED_TYPE_TO_MIME: Record<string, string> = {
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/m4a",
+  };
+
+  const uploadFile = async (
+    file: File,
+    presignedUrl: string,
+    contentType: string,
+  ) => {
     const response = await fetch(presignedUrl, {
       method: "PUT",
-      headers: { "Content-Type": file.type },
+      headers: { "Content-Type": contentType },
       body: file,
     });
     if (!response.ok) throw new Error("Upload failed");
@@ -258,16 +271,26 @@ const CaseTranscriptions: React.FC = () => {
     setIsUploading(true);
     setError(null);
 
+    // When true, the WebSocket callbacks own isUploading and the finally
+    // block must not reset it out from under an in-progress transcription.
+    let handedOffToCallbacks = false;
+
     try {
       const audioFileId = uuidv4();
+
+      // Create the DB record first so the audio file is bound to the case
+      // before any upload capability is issued.
+      await initializeAudioFileInDb(audioFileId, audioFile.name);
+
       const presignedUrl = await generatePresignedUrl(audioFileId);
       if (!presignedUrl) {
         throw new Error("Failed to generate presigned URL");
       }
 
-      // Upload file to S3 and initialize DB record
-      await uploadFile(audioFile.file, presignedUrl);
-      await initializeAudioFileInDb(audioFileId, audioFile.name);
+      // Upload file to S3 using the MIME type that matches the signed URL.
+      const uploadContentType =
+        NORMALIZED_TYPE_TO_MIME[audioFile.type] || audioFile.file.type;
+      await uploadFile(audioFile.file, presignedUrl, uploadContentType);
 
       // Trigger transcription via WebSocket (primary) or HTTP (fallback)
       if (isConnected) {
@@ -304,7 +327,9 @@ const CaseTranscriptions: React.FC = () => {
             },
           },
         );
-        // Don't set isUploading=false here; the callbacks handle it
+        // The callbacks own isUploading from here.
+        handedOffToCallbacks = true;
+        setAudioTitle("");
         return;
       }
 
@@ -314,13 +339,12 @@ const CaseTranscriptions: React.FC = () => {
       if (token) {
         // Fire the request but don't await it (it will timeout at 29s anyway)
         fetch(
-          `${import.meta.env.VITE_API_ENDPOINT}student/audio_to_text?` +
+          `${import.meta.env.VITE_API_ENDPOINT}/student/audio_to_text?` +
             `audio_file_id=${encodeURIComponent(audioFileId)}&` +
             `file_name=${encodeURIComponent(audioFile.name)}&` +
             `file_type=${encodeURIComponent(audioFile.type)}&` +
             `case_title=${encodeURIComponent(caseData?.case_title || "Unknown Case")}&` +
-            `case_id=${encodeURIComponent(caseId || "unknown")}&` +
-            `cognito_token=${encodeURIComponent(token)}`,
+            `case_id=${encodeURIComponent(caseId || "unknown")}`,
           {
             method: "GET",
             headers: {
@@ -338,8 +362,10 @@ const CaseTranscriptions: React.FC = () => {
     } catch (error: unknown) {
       setError((error as Error).message || "Failed to upload audio file");
     } finally {
-      setIsUploading(false);
-      setAudioTitle("");
+      if (!handedOffToCallbacks) {
+        setIsUploading(false);
+        setAudioTitle("");
+      }
     }
   };
 
@@ -421,7 +447,7 @@ const CaseTranscriptions: React.FC = () => {
       const response = await fetch(
         `${
           import.meta.env.VITE_API_ENDPOINT
-        }student/transcription?audio_file_id=${audioFileId}`,
+        }/student/transcription?audio_file_id=${audioFileId}`,
         {
           method: "GET",
           headers: {
@@ -465,8 +491,9 @@ const CaseTranscriptions: React.FC = () => {
     y += 10;
 
     const tempDiv = document.createElement("div");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    tempDiv.innerHTML = await (marked.parse(audioText || "") as any);
+    tempDiv.innerHTML = DOMPurify.sanitize(
+      await (marked.parse(audioText || "") as Promise<string>),
+    );
     const content = tempDiv.textContent || tempDiv.innerText || "";
     const lines = doc.splitTextToSize(content, 180);
 
@@ -532,7 +559,7 @@ const CaseTranscriptions: React.FC = () => {
       const response = await fetch(
         `${
           import.meta.env.VITE_API_ENDPOINT
-        }student/delete_transcription?audio_file_id=${deleteTranscriptionId}`,
+        }/student/delete_transcription?audio_file_id=${deleteTranscriptionId}`,
         {
           method: "DELETE",
           headers: {

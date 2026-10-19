@@ -57,6 +57,38 @@ async function putSecret(name, secret) {
   );
 }
 
+/**
+ * Resolve the password to use for an app DB role.
+ *
+ * Reuses the password already stored in the role's Secrets Manager secret when
+ * one is present, and only generates a fresh one on first provisioning (empty or
+ * unreadable secret). This keeps the DB role password and the secret in lockstep
+ * across every run: the role is always ALTERed to the value the RDS Proxy and the
+ * runtime Lambdas already read, so they cannot drift. Previously a new random
+ * password was generated on every invocation, which opened a window where the
+ * role password and the secret disagreed (observed as
+ * "The password that was provided for the role app_rw is wrong") if the secret
+ * write lagged, failed, or the proxy had not yet refreshed.
+ */
+async function resolveRolePassword(secretName) {
+  try {
+    const existing = await getSecret(secretName);
+    if (
+      existing &&
+      typeof existing.password === "string" &&
+      existing.password.length > 0
+    ) {
+      return existing.password;
+    }
+  } catch (err) {
+    // Secret missing/unreadable on first provisioning; fall through to generate.
+    console.log(
+      `No reusable password in secret ${secretName}; generating a new one.`,
+    );
+  }
+  return crypto.randomBytes(16).toString("hex");
+}
+
 
 async function runMigrations(db, direction = "up", count = Infinity) {
   const client = new Client(dbConnectionConfig(db, process.env.RDS_PROXY_ENDPOINT));
@@ -116,11 +148,13 @@ async function createAppUsers(
     throw error;
   }
 
-  // Stable usernames; rotate passwords idempotently
+  // Stable usernames; passwords are reused from the existing secrets so the DB
+  // role and the secret the RDS Proxy / Lambdas read stay in lockstep. A fresh
+  // password is only generated on first provisioning (empty secret).
   const RW_NAME = "app_rw";
   const TC_NAME = "app_tc";
-  const rwPass = crypto.randomBytes(16).toString("hex");
-  const tcPass = crypto.randomBytes(16).toString("hex");
+  const rwPass = await resolveRolePassword(userSecretName);
+  const tcPass = await resolveRolePassword(tableCreatorSecretName);
 
   // Safe quoting for DB identifier inside SQL
   const dbIdent = adminDb.dbname.replace(/"/g, '""');

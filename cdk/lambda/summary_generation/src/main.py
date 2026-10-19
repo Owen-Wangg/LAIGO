@@ -23,6 +23,7 @@ from helpers.chat import (
     retrieve_dynamodb_history,
     generate_full_case_summary,
 )
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 from aws_lambda_powertools import Logger, Metrics
 
 # Set up logging and metrics for the Lambda function
@@ -39,6 +40,7 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 BEDROCK_TEMP_PARAM = os.environ.get("BEDROCK_TEMP_PARAM")
 BEDROCK_TOP_P_PARAM = os.environ.get("BEDROCK_TOP_P_PARAM")
 BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
+MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]
 # AWS Clients
 secrets_manager_client = boto3.client("secretsmanager")
 ssm_client = boto3.client("ssm", region_name=REGION)
@@ -52,6 +54,7 @@ BEDROCK_LLM_ID = None
 BEDROCK_TEMP = 0.5
 BEDROCK_TOP_P = 0.9
 BEDROCK_MAX_TOKENS = 2048
+MESSAGE_LIMIT = None
 
 FULL_CASE_BLOCK_TYPES = ["intake", "legal_analysis", "contrarian", "policy"]
 
@@ -61,7 +64,7 @@ DISCLAIMER = "\n\n---\n**DISCLAIMER:**\nTHIS SUMMARY MUST NOT BE PROVIDED TO THE
 def get_cors_origin(event):
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
     if not allowed_origin:
-        return "*"
+        return "http://localhost:5173"
     return allowed_origin
 
 
@@ -113,7 +116,7 @@ def get_parameter(param_name, cached_var):
     return cached_var
 
 def initialize_constants():
-    global BEDROCK_LLM_ID, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS
+    global BEDROCK_LLM_ID, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS, MESSAGE_LIMIT
     BEDROCK_LLM_ID = get_parameter(BEDROCK_LLM_PARAM, BEDROCK_LLM_ID)
 
     if BEDROCK_TEMP_PARAM:
@@ -130,6 +133,10 @@ def initialize_constants():
         max_tokens_val = get_parameter(BEDROCK_MAX_TOKENS_PARAM, None)
         if max_tokens_val:
             BEDROCK_MAX_TOKENS = int(max_tokens_val)
+
+    MESSAGE_LIMIT = get_parameter(MESSAGE_LIMIT_PARAM, MESSAGE_LIMIT)
+    if MESSAGE_LIMIT is None:
+        MESSAGE_LIMIT = "Infinity"
 
 
     
@@ -158,7 +165,14 @@ def connect_to_db():
             'user': secret["username"],
             'password': secret["password"],
             'host': RDS_PROXY_ENDPOINT,
-            'port': secret["port"]
+            'port': secret["port"],
+            # Require TLS and verify the server certificate and hostname. The RDS
+            # Proxy presents a certificate from the public Amazon CA chain; point
+            # sslrootcert at the OS CA bundle (which contains the Amazon roots)
+            # rather than "system", which the psycopg binary wheel's bundled
+            # OpenSSL does not resolve to the container's trust store.
+            'sslmode': 'verify-full',
+            'sslrootcert': '/etc/pki/tls/certs/ca-bundle.crt'
         }
         connection_string = " ".join([f"{key}={value}" for key, value in connection_params.items()])
         connection = psycopg.connect(connection_string)
@@ -248,12 +262,16 @@ def send_to_websocket(connection_id, endpoint, request_id, msg_type, content=Non
         logger.error(f"Error sending to WebSocket: {e}")
 
 
-def _error_response(status_code, message, is_websocket=False, connection_id=None, ws_endpoint=None, request_id=None, event=None):
+def _error_response(status_code, message, is_websocket=False, connection_id=None, ws_endpoint=None, request_id=None, event=None, code=None):
     """Helper for generating error responses for both HTTP and WebSocket modes."""
     if is_websocket and connection_id:
-        send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=message)
+        ws_data = {"code": code} if code else None
+        send_to_websocket(connection_id, ws_endpoint, request_id, "error", content=message, data=ws_data)
         return {"statusCode": status_code}
-    return create_response(status_code, {"error": message}, event)
+    body = {"error": message}
+    if code:
+        body["code"] = code
+    return create_response(status_code, body, event)
 
 
 def _require_non_empty_summary(body: str) -> str:
@@ -548,7 +566,12 @@ def publish_notification_event(event_type, case_id, user_id, success=True, error
             notification_type = "summary_complete"
         else:
             title = "Summary Generation Failed"
-            message = f"Summary generation failed for {block_name}: {error_message or 'Unknown error'}"
+            # Keep raw exception text out of user-facing notifications; it can
+            # leak schema, SQL fragments, model IDs, ARNs and host details. The
+            # detailed error is recorded server-side for diagnosis instead.
+            if error_message:
+                logger.error(f"Summary generation failure detail for case {case_id}: {error_message}")
+            message = f"Summary generation failed for {block_name}. Please try again later or contact an administrator."
             notification_type = "summary_complete"
 
         event_detail = {
@@ -562,7 +585,6 @@ def publish_notification_event(event_type, case_id, user_id, success=True, error
                 "status": "success" if success else "failed",
                 "eventType": event_type,
                 "blockName": block_name,
-                **({"errorMessage": error_message} if error_message else {})
             }
         }
 
@@ -652,6 +674,16 @@ def handler(event, context):
         logger.error(f"Authorization failed: User {user_id} does not own case {case_id}")
         return _error_response(403, "Forbidden: You do not own this case", is_websocket, connection_id, ws_endpoint, request_id, event=event)
 
+    # Require the user to have accepted the legal/AI-use waiver before any
+    # AI feature runs. Fails closed if the acceptance state cannot be read.
+    try:
+        conn = connect_to_db()
+        if not is_disclaimer_accepted(conn, user_id):
+            return _error_response(403, "You must accept the disclaimer before using the AI assistant.", is_websocket, connection_id, ws_endpoint, request_id, event=event, code="DISCLAIMER_NOT_ACCEPTED")
+    except Exception as e:
+        logger.error(f"Error checking disclaimer acceptance: {e}")
+        return _error_response(503, "Service temporarily unavailable. Please try again later.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+
     case_title, case_type, jurisdiction, case_description = get_case_details(case_id)
     if case_title is None or case_type is None or jurisdiction is None or case_description is None:
         logger.error(f"Error fetching case details for case_id: {case_id}")
@@ -668,6 +700,20 @@ def handler(event, context):
     except Exception as e:
         logger.error(f"Error getting LLM from Bedrock: {e}")
         return _error_response(500, 'An unexpected error occurred. Please try again later or contact an administrator.', is_websocket, connection_id, ws_endpoint, request_id, event=event)
+
+    # Enforce the daily message limit before invoking Bedrock. Counts as one
+    # message per request and fails closed if the usage check cannot complete.
+    if MESSAGE_LIMIT != "Infinity":
+        try:
+            limit = int(MESSAGE_LIMIT)
+            conn = connect_to_db()
+            current_usage = check_and_increment_usage(conn, user_id)
+            logger.info(f"User {user_id} usage: {current_usage}/{limit}")
+            if current_usage > limit:
+                return _error_response(429, "Daily message limit reached. Please contact your administrator.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+        except Exception as e:
+            logger.error(f"Error checking message limit: {e}")
+            return _error_response(503, "Service temporarily unavailable. Please try again later.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
 
     # --- Full Case Summary Logic ---
     if sub_route == "full-case":

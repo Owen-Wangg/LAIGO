@@ -245,6 +245,7 @@ exports.handler = async (event, context) => {
       const playgroundAssessPayload = {
         isWebSocket: true,
         userId: userId,
+        callerRoles: roles,
         requestId: requestId,
         body: JSON.stringify({
           playground_mode: true,
