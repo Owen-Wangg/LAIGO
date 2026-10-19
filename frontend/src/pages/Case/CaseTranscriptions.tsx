@@ -112,7 +112,7 @@ const CaseTranscriptions: React.FC = () => {
       const token = tokens?.idToken?.toString();
       if (!token) return;
       const response = await fetch(
-        `${import.meta.env.VITE_API_ENDPOINT}student/file_size_limit`,
+        `${import.meta.env.VITE_API_ENDPOINT}/student/file_size_limit`,
         {
           method: "GET",
           headers: {
@@ -201,7 +201,7 @@ const CaseTranscriptions: React.FC = () => {
     if (!token) throw new Error("No token");
 
     const response = await fetch(
-      `${import.meta.env.VITE_API_ENDPOINT}student/generate_presigned_url?` +
+      `${import.meta.env.VITE_API_ENDPOINT}/student/generate_presigned_url?` +
         `audio_file_id=${encodeURIComponent(audioFileId)}&` +
         `file_name=${encodeURIComponent(fileName)}&` +
         `file_type=${encodeURIComponent(fileType)}`,
@@ -226,7 +226,7 @@ const CaseTranscriptions: React.FC = () => {
     const s3FilePath = `${audioFileId}/${fileName}`;
 
     const response = await fetch(
-      `${import.meta.env.VITE_API_ENDPOINT}student/initialize_audio_file?` +
+      `${import.meta.env.VITE_API_ENDPOINT}/student/initialize_audio_file?` +
         `audio_file_id=${encodeURIComponent(audioFileId)}&` +
         `s3_file_path=${encodeURIComponent(s3FilePath)}&` +
         `case_id=${encodeURIComponent(caseId || "")}&` +
@@ -318,7 +318,7 @@ const CaseTranscriptions: React.FC = () => {
       if (token) {
         // Fire the request but don't await it (it will timeout at 29s anyway)
         fetch(
-          `${import.meta.env.VITE_API_ENDPOINT}student/audio_to_text?` +
+          `${import.meta.env.VITE_API_ENDPOINT}/student/audio_to_text?` +
             `audio_file_id=${encodeURIComponent(audioFileId)}&` +
             `file_name=${encodeURIComponent(audioFile.name)}&` +
             `file_type=${encodeURIComponent(audioFile.type)}&` +

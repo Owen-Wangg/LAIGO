@@ -1391,7 +1391,7 @@ const PromptPlayground: React.FC = () => {
       const token = session.tokens?.idToken?.toString();
       if (!token) return;
       const response = await fetch(
-        `${import.meta.env.VITE_API_ENDPOINT}admin/prompt?category=reasoning&block_type=${blockType}`,
+        `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt?category=reasoning&block_type=${blockType}`,
         {
           headers: { Authorization: token },
         },
@@ -1411,7 +1411,7 @@ const PromptPlayground: React.FC = () => {
       const token = session.tokens?.idToken?.toString();
       if (!token) return;
       const response = await fetch(
-        `${import.meta.env.VITE_API_ENDPOINT}admin/prompt?category=assessment&block_type=${blockType}`,
+        `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt?category=assessment&block_type=${blockType}`,
         {
           headers: { Authorization: token },
         },
@@ -1562,7 +1562,7 @@ const PromptPlayground: React.FC = () => {
         }
 
         const response = await fetch(
-          `${import.meta.env.VITE_API_ENDPOINT}admin/prompt`,
+          `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt`,
           {
             method: "PUT",
             headers: {
@@ -1614,7 +1614,7 @@ const PromptPlayground: React.FC = () => {
         }
 
         const response = await fetch(
-          `${import.meta.env.VITE_API_ENDPOINT}admin/prompt`,
+          `${import.meta.env.VITE_API_ENDPOINT}/admin/prompt`,
           {
             method: "PUT",
             headers: {
