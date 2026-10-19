@@ -1783,14 +1783,24 @@ export class ApiGatewayStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
       resources: [
-        // Anthropic Claude models (foundation models)
+        // Anthropic Claude models (foundation models, local region)
         `arn:aws:bedrock:${this.region}::foundation-model/anthropic.*`,
-        // Meta Llama models (foundation models)
+        // Meta Llama models (foundation models, local region)
         `arn:aws:bedrock:${this.region}::foundation-model/meta.*`,
         // Cross-region inference profiles (Anthropic)
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.*`,
         // Cross-region inference profiles (Meta)
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.meta.*`,
+        // Invoking a "us." cross-region inference profile fans the request out to
+        // the underlying foundation models in the US regions the profile spans
+        // (us-east-1 / us-east-2 / us-west-2). bedrock:InvokeModel must therefore
+        // be allowed on those foundation-model ARNs too, or Bedrock returns
+        // AccessDeniedException for the destination region (e.g. us-east-1).
+        // See: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
+        ...["us-east-1", "us-east-2", "us-west-2"].flatMap((r) => [
+          `arn:aws:bedrock:${r}::foundation-model/anthropic.*`,
+          `arn:aws:bedrock:${r}::foundation-model/meta.*`,
+        ]),
       ],
     });
 
