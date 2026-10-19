@@ -138,7 +138,7 @@ const CaseTranscriptions: React.FC = () => {
       const response = await fetch(
         `${
           import.meta.env.VITE_API_ENDPOINT
-        }student/get_transcriptions?case_id=${caseId}`,
+        }/student/get_transcriptions?case_id=${caseId}`,
         {
           method: "GET",
           headers: {
@@ -165,7 +165,7 @@ const CaseTranscriptions: React.FC = () => {
         const response = await fetch(
           `${
             import.meta.env.VITE_API_ENDPOINT
-          }student/case_page?case_id=${caseId}`,
+          }/student/case_page?case_id=${caseId}`,
           {
             method: "GET",
             headers: {
@@ -447,7 +447,7 @@ const CaseTranscriptions: React.FC = () => {
       const response = await fetch(
         `${
           import.meta.env.VITE_API_ENDPOINT
-        }student/transcription?audio_file_id=${audioFileId}`,
+        }/student/transcription?audio_file_id=${audioFileId}`,
         {
           method: "GET",
           headers: {
@@ -559,7 +559,7 @@ const CaseTranscriptions: React.FC = () => {
       const response = await fetch(
         `${
           import.meta.env.VITE_API_ENDPOINT
-        }student/delete_transcription?audio_file_id=${deleteTranscriptionId}`,
+        }/student/delete_transcription?audio_file_id=${deleteTranscriptionId}`,
         {
           method: "DELETE",
           headers: {
