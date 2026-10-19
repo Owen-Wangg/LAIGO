@@ -1206,8 +1206,11 @@ export class ApiGatewayStack extends cdk.Stack {
 
     const defaultBedrockModelOptions = [
       {
-        label: "Claude Sonnet 5",
-        value: `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5`,
+        label: "Claude Sonnet 5.5",
+        value: `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5-5`,
+        // NOTE: Claude 5.x ignores temperature/top_p (the backend omits them for
+        // this family). Ranges are kept so the admin UI renders; the sliders are
+        // effectively inert for this model.
         constraints: {
           maxOutputTokens: 128000,
           defaultMaxOutputTokens: 4096,

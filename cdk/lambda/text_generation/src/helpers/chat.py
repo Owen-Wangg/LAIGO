@@ -45,6 +45,37 @@ _chat_logger = logging.getLogger(__name__)
 class LLM_evaluation(BaseModel):
     response: str = Field(description="Assessment of the student's answer with a follow-up question.")
 
+
+def _bedrock_provider(model_id: str):
+    """Infer the Bedrock provider. Required by ChatBedrockConverse when the model
+    id is a full inference-profile ARN (the provider cannot be inferred from an ARN)."""
+    mid = (model_id or "").lower()
+    if ("anthropic" in mid) or ("claude" in mid):
+        return "anthropic"
+    if ("meta" in mid) or ("llama" in mid):
+        return "meta"
+    return None
+
+
+def _sampling_params_mode(model_id: str) -> str:
+    """Return which sampling params a model accepts: 'both', 'single', or 'none'.
+
+    - Meta/Llama and Claude 3.x accept both temperature and top_p.
+    - Claude 4.x (e.g. Sonnet 4.5/4.6) accept only ONE of temperature/top_p.
+    - Claude 5.x+ (e.g. Sonnet 5/5.5) accept NEITHER.
+    """
+    mid = (model_id or "").lower()
+    if not (("anthropic" in mid) or ("claude" in mid)):
+        return "both"
+    for fam in ("sonnet", "opus", "haiku", "fable"):
+        if f"claude-{fam}-5" in mid:
+            return "none"
+    for fam in ("sonnet", "opus", "haiku"):
+        if f"claude-{fam}-4" in mid:
+            return "single"
+    return "both"
+
+
 def get_bedrock_llm(
     bedrock_llm_id: str,
     temperature: float = 0,
@@ -74,13 +105,24 @@ def get_bedrock_llm(
             "guardrailVersion": guardrail_version,
         }
     
-    return ChatBedrockConverse(
-        model=bedrock_llm_id,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        top_p=top_p,
-        guardrail_config=guardrail_config if guardrail_config else None,
-    )
+    kwargs = {
+        "model": bedrock_llm_id,
+        "max_tokens": max_tokens,
+    }
+    # Supply provider explicitly so inference-profile ARNs are accepted.
+    provider = _bedrock_provider(bedrock_llm_id)
+    if provider:
+        kwargs["provider"] = provider
+    # Only send sampling params the selected model actually supports.
+    mode = _sampling_params_mode(bedrock_llm_id)
+    if mode == "both":
+        kwargs["temperature"] = temperature
+        kwargs["top_p"] = top_p
+    elif mode == "single":
+        kwargs["temperature"] = temperature
+    if guardrail_config:
+        kwargs["guardrail_config"] = guardrail_config
+    return ChatBedrockConverse(**kwargs)
 
 
 def get_initial_student_query(case_type: str, jurisdiction: str, case_description: str) -> str:
