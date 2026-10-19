@@ -186,10 +186,10 @@ const ModelConfigSection: React.FC<{
 }> = React.memo(({ config, onConfigChange, availableModels, label }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const selectedModel = availableModels.find((m) => m.id === config.modelId);
-  const temperatureMin = selectedModel?.constraints?.temperatureRange[0] ?? 0;
-  const temperatureMax = selectedModel?.constraints?.temperatureRange[1] ?? 1;
-  const topPMin = selectedModel?.constraints?.topPRange[0] ?? 0;
-  const topPMax = selectedModel?.constraints?.topPRange[1] ?? 1;
+  const temperatureMin = selectedModel?.constraints?.temperatureRange?.[0] ?? 0;
+  const temperatureMax = selectedModel?.constraints?.temperatureRange?.[1] ?? 1;
+  const topPMin = selectedModel?.constraints?.topPRange?.[0] ?? 0;
+  const topPMax = selectedModel?.constraints?.topPRange?.[1] ?? 1;
   const maxTokensLimit = selectedModel?.constraints?.maxOutputTokens ?? 8192;
 
   return (
