@@ -21,7 +21,7 @@ TABLE_NAME_PARAM = os.environ["TABLE_NAME_PARAM"]
 BEDROCK_TEMP_PARAM = os.environ.get("BEDROCK_TEMP_PARAM")
 BEDROCK_TOP_P_PARAM = os.environ.get("BEDROCK_TOP_P_PARAM")
 BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
-MESSAGE_LIMIT_PARAM = os.environ.get("MESSAGE_LIMIT_PARAM")
+MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]
 
 # AWS Clients
 secrets_manager_client = boto3.client("secretsmanager")
