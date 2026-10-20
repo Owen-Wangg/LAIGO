@@ -106,6 +106,24 @@ const Login = () => {
     }
   };
 
+  // Maps confirmation-code errors (sign-up and password-reset) to user-facing
+  // messages. An unknown user, a wrong code, and an expired code are collapsed
+  // into a single generic message so the confirmation step cannot be used as an
+  // account-existence oracle. Raw Cognito messages are never surfaced here.
+  const confirmErrorMessage = (err: Error) => {
+    switch (err.name) {
+      case "UserNotFoundException":
+      case "CodeMismatchException":
+      case "ExpiredCodeException":
+        return "Invalid or expired confirmation code.";
+      case "LimitExceededException":
+      case "TooManyRequestsException":
+        return "Too many attempts. Please wait a moment and try again.";
+      default:
+        return "Invalid or expired confirmation code.";
+    }
+  };
+
   const validateSignUpForm = () => {
     const errors: {
       firstName?: string;
@@ -255,7 +273,7 @@ const Login = () => {
     } catch (err) {
       setSnackbar({
         open: true,
-        message: cleanErrorMessage((err as Error).message),
+        message: confirmErrorMessage(err as Error),
         severity: "error",
       });
     } finally {
@@ -324,7 +342,7 @@ const Login = () => {
     } catch (err) {
       setSnackbar({
         open: true,
-        message: cleanErrorMessage((err as Error).message),
+        message: confirmErrorMessage(err as Error),
         severity: "error",
       });
     }
