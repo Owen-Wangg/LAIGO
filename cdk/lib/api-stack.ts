@@ -40,7 +40,6 @@ import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 // Stack properties for API Gateway configuration
 interface ApiGatewayStackProps extends cdk.StackProps {
   ecrRepositories: { [key: string]: ecr.Repository }; // ECR repositories for Lambda Docker images
-  imageDigestParameterNames?: { [key: string]: string }; // SSM parameter names holding the pipeline-approved image digest per function
   domainName?: string; // Optional custom domain (host only) registered in Amplify and used as the CORS origin
   frontendOrigin?: string; // Optional explicit frontend origin (full URL) for CORS lockdown without registering an Amplify custom domain
   sesVerifiedDomain?: string; // Optional SES verified domain for Cognito email (independent of domainName)
@@ -1941,25 +1940,6 @@ export class ApiGatewayStack extends cdk.Stack {
       .defaultChild as lambda.CfnFunction;
     cfnTextGenDockerFunc.overrideLogicalId("TextGenLambdaDockerFunc");
 
-    // Pin the deployed image to the pipeline-approved digest (resolved at deploy
-    // time from SSM) instead of the one-time `bootstrap` tag. Without this, every
-    // `cdk deploy` would reset the function to the first image ever built and
-    // silently revert container-level security fixes shipped since.
-    const textGenDigestParam =
-      props.imageDigestParameterNames?.["textGeneration"];
-    if (textGenDigestParam) {
-      const textGenImageDigest = ssm.StringParameter.valueForStringParameter(
-        this,
-        textGenDigestParam,
-      );
-      cfnTextGenDockerFunc.addPropertyOverride(
-        "Code.ImageUri",
-        props.ecrRepositories["textGeneration"].repositoryUriForDigest(
-          textGenImageDigest,
-        ),
-      );
-    }
-
     // Add the permission to the Lambda function's policy to allow API Gateway access
     textGenLambdaDockerFunc.addPermission("AllowApiGatewayInvoke", {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
@@ -2041,21 +2021,6 @@ export class ApiGatewayStack extends cdk.Stack {
     cfnPlaygroundGenDockerFunc.overrideLogicalId(
       "PlaygroundTextGenLambdaDockerFunc",
     );
-
-    // Pin to the pipeline-approved digest from SSM (see textGen above) so a
-    // `cdk deploy` never rolls this function back to the one-time bootstrap image.
-    const playgroundDigestParam =
-      props.imageDigestParameterNames?.["playgroundGeneration"];
-    if (playgroundDigestParam) {
-      const playgroundImageDigest =
-        ssm.StringParameter.valueForStringParameter(this, playgroundDigestParam);
-      cfnPlaygroundGenDockerFunc.addPropertyOverride(
-        "Code.ImageUri",
-        props.ecrRepositories["playgroundGeneration"].repositoryUriForDigest(
-          playgroundImageDigest,
-        ),
-      );
-    }
 
     // Add permissions
     playgroundGenLambdaDockerFunc.addPermission("AllowApiGatewayInvoke", {

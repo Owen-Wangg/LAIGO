@@ -32,11 +32,6 @@ interface CICDStackProps extends cdk.StackProps {
 export class CICDStack extends cdk.Stack {
   // Map of ECR repositories created for each Lambda function
   public readonly ecrRepositories: { [key: string]: ecr.Repository } = {};
-  // Map of SSM parameter names holding the currently-approved image digest per
-  // Lambda function. The pipeline writes the scanned digest here on every run;
-  // ApiStack reads it at deploy time so `cdk deploy` pins the live digest instead
-  // of rolling back to the one-time `bootstrap` tag.
-  public readonly imageDigestParameterNames: { [key: string]: string } = {};
 
   constructor(scope: Construct, id: string, props: CICDStackProps) {
     super(scope, id, props);
@@ -159,23 +154,6 @@ export class CICDStack extends cdk.Stack {
       this.ecrRepositories[lambda.name] = ecrRepo;
       cdk.Tags.of(ecrRepo).add("module", lambda.name); // Resource-specific tag (not part of global standard set)
 
-      // SSM parameter that tracks the currently-approved image digest for this
-      // function. The pipeline writes the scanned digest here on every run; the
-      // leading-slash name maps to ARN `...:parameter/<id>/image-digest/<name>`.
-      const digestParamName = `/${id}/image-digest/${lambda.name}`;
-      this.imageDigestParameterNames[lambda.name] = digestParamName;
-
-      // Allow the build to publish the resolved digest for this function only.
-      codeBuildRole.addToPolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["ssm:PutParameter"],
-          resources: [
-            `arn:aws:ssm:${this.region}:${this.account}:parameter${digestParamName}`,
-          ],
-        }),
-      );
-
       // Create CodeBuild project for building Docker images
       const buildProject = new codebuild.PipelineProject(
         this,
@@ -205,7 +183,6 @@ export class CICDStack extends cdk.Stack {
             PATH_FILTER: { value: lambda.sourceDir }, // Directory to monitor for changes
             BLOCKING_SEVERITIES: { value: "CRITICAL HIGH" }, // Finding severities that block deployment
             SCAN_TIMEOUT_SECONDS: { value: "300" }, // Max time to wait for scan completion
-            DIGEST_PARAM_NAME: { value: digestParamName }, // SSM parameter CDK reads to pin the live image digest
           },
           // Build specification defining the build process
           buildSpec: codebuild.BuildSpec.fromObject({
@@ -324,15 +301,6 @@ export class CICDStack extends cdk.Stack {
                       exit 1
                     fi
                     echo "Resolved image digest: $IMAGE_DIGEST"
-                    # Publish the approved digest so a future "cdk deploy" of ApiStack
-                    # pins this exact image instead of rolling back to the one-time
-                    # bootstrap tag. Written every run so CDK always sees the latest.
-                    echo "Publishing digest to SSM parameter $DIGEST_PARAM_NAME..."
-                    aws ssm put-parameter \
-                      --name "$DIGEST_PARAM_NAME" \
-                      --type String \
-                      --value "$IMAGE_DIGEST" \
-                      --overwrite
                     echo "Checking if Lambda function exists before updating..."
                     if aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME &>/dev/null; then
                       echo "Updating Lambda function to use the scanned image digest..."
