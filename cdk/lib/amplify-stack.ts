@@ -13,6 +13,7 @@ import { applyStandardTags } from "./shared/tagging";
 interface AmplifyStackProps extends cdk.StackProps {
   githubRepo: string;
   domainName?: string;
+  frontendOrigin?: string;
 }
 
 export class AmplifyStack extends cdk.Stack {
@@ -29,10 +30,13 @@ export class AmplifyStack extends cdk.Stack {
 
     const githubRepoName = props.githubRepo;
 
-    // Build CSP connect-src directive based on whether a custom domain is configured
+    // Build CSP connect-src directive based on whether a prod frontend origin is
+    // configured. Either a custom domain (domainName) or an explicit frontend
+    // origin (frontendOrigin) marks a locked-down prod deployment; both must gate
+    // the lockdown so the permissive branch is unreachable in prod.
     let connectSrc: string;
-    if (props.domainName) {
-      // Lock down connect-src to specific backends when a custom domain is provided
+    if (props.domainName || props.frontendOrigin) {
+      // Lock down connect-src to specific backends for prod deployments
       const apiEndpoint = apiStack.getEndpointUrl();
       const wsUrl = apiStack.getWebSocketUrl();
       const cognitoIdpEndpoint = `https://cognito-idp.${this.region}.amazonaws.com`;
@@ -41,7 +45,7 @@ export class AmplifyStack extends cdk.Stack {
       const whitelistUploadBucketEndpoint = `https://${apiStack.getWhitelistUploadBucketName()}.s3.${this.region}.amazonaws.com`;
       connectSrc = `'self' ${apiEndpoint} ${wsUrl} ${cognitoIdpEndpoint} ${cognitoIdentityEndpoint} ${audioPromptBucketEndpoint} ${whitelistUploadBucketEndpoint}`;
     } else {
-      // Permissive connect-src when no custom domain is configured
+      // Permissive connect-src only for non-prod deployments with no configured origin
       connectSrc = "'self' wss: https:";
     }
 
