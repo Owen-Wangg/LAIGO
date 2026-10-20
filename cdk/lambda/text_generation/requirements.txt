@@ -2,7 +2,7 @@
 #    uv pip compile cdk/lambda/text_generation/requirements.in -o cdk/lambda/text_generation/requirements.txt
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.14.0
+aiohttp==3.14.4
     # via langchain-community
 aiosignal==1.4.0
     # via aiohttp
@@ -231,7 +231,7 @@ xxhash==3.6.0
     # via
     #   langgraph
     #   langsmith
-yarl==1.22.0
+yarl==1.25.1
     # via aiohttp
 zstandard==0.25.0
     # via langsmith
