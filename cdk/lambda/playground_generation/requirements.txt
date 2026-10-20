@@ -30,7 +30,7 @@ botocore==1.42.57
     #   aws-xray-sdk
     #   boto3
     #   s3transfer
-certifi==2026.2.25
+certifi==2026.10.19
     # via
     #   httpcore
     #   httpx
