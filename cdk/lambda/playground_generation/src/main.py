@@ -2,10 +2,12 @@ import os
 import json
 import boto3
 import uuid
+import psycopg
 from aws_lambda_powertools import Logger
 from bedrock_client import get_bedrock_runtime_client
 
 from helpers.chat import get_bedrock_llm, get_playground_streaming_response
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 
 # Set up logging for the Lambda function
 logger = Logger(service="PlaygroundGeneration")
@@ -13,13 +15,13 @@ logger = Logger(service="PlaygroundGeneration")
 # Environment variables
 DB_SECRET_NAME = os.environ["SM_DB_CREDENTIALS"]
 REGION = os.environ["REGION"]
-# RDS_PROXY_ENDPOINT is availble but maybe not needed if we don't connect to Postgres for cases
-RDS_PROXY_ENDPOINT = os.environ.get("RDS_PROXY_ENDPOINT") 
+RDS_PROXY_ENDPOINT = os.environ.get("RDS_PROXY_ENDPOINT")
 BEDROCK_LLM_PARAM = os.environ["BEDROCK_LLM_PARAM"]
 TABLE_NAME_PARAM = os.environ["TABLE_NAME_PARAM"]
 BEDROCK_TEMP_PARAM = os.environ.get("BEDROCK_TEMP_PARAM")
 BEDROCK_TOP_P_PARAM = os.environ.get("BEDROCK_TOP_P_PARAM")
 BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
+MESSAGE_LIMIT_PARAM = os.environ.get("MESSAGE_LIMIT_PARAM")
 
 # AWS Clients
 secrets_manager_client = boto3.client("secretsmanager")
@@ -27,11 +29,73 @@ ssm_client = boto3.client("ssm", region_name=REGION)
 bedrock_runtime = get_bedrock_runtime_client(region_name=REGION)
 
 # Cached resources
+connection = None
+db_secret = None
 BEDROCK_LLM_ID = None
 TABLE_NAME = None
 BEDROCK_TEMP = 0.5
 BEDROCK_TOP_P = 0.9
 BEDROCK_MAX_TOKENS = 2048
+MESSAGE_LIMIT = None
+
+
+def get_secret(secret_name, expect_json=True):
+    global db_secret
+    if db_secret is None:
+        try:
+            logger.info(f"Fetching secret: {secret_name}")
+            response = secrets_manager_client.get_secret_value(SecretId=secret_name)["SecretString"]
+            db_secret = json.loads(response) if expect_json else response
+        except Exception as e:
+            logger.exception(f"Failed to fetch or decode secret '{secret_name}': {e}")
+            raise
+    return db_secret
+
+
+def connect_to_db():
+    global connection
+    if connection is not None and not connection.closed:
+        # Health check: verify the existing connection is still usable
+        try:
+            with connection.cursor() as cur:
+                cur.execute("SELECT 1")
+            return connection
+        except Exception as e:
+            logger.warning(f"Stale database connection detected, reconnecting: {e}")
+            try:
+                connection.close()
+            except Exception:
+                pass
+            connection = None
+
+    try:
+        logger.info("Connecting to database with SSL/TLS...")
+        secret = get_secret(DB_SECRET_NAME)
+        connection_params = {
+            'dbname': secret["dbname"],
+            'user': secret["username"],
+            'password': secret["password"],
+            'host': RDS_PROXY_ENDPOINT,
+            'port': secret["port"],
+            # Require TLS and verify the RDS Proxy certificate/hostname against
+            # the OS CA bundle (which contains the Amazon roots), mirroring the
+            # standard-mode Lambdas.
+            'sslmode': 'verify-full',
+            'sslrootcert': '/etc/pki/tls/certs/ca-bundle.crt',
+        }
+        connection_string = " ".join([f"{key}={value}" for key, value in connection_params.items()])
+        connection = psycopg.connect(connection_string)
+        logger.info("Successfully connected to database with SSL/TLS")
+    except Exception as e:
+        logger.exception(f"Failed to connect to database: {e}")
+        if connection:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        connection = None
+        raise
+    return connection
 
 def get_cors_origin(event):
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "")
@@ -68,7 +132,7 @@ def get_parameter(param_name, cached_var):
     return cached_var
 
 def initialize_constants():
-    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS
+    global BEDROCK_LLM_ID, TABLE_NAME, BEDROCK_TEMP, BEDROCK_TOP_P, BEDROCK_MAX_TOKENS, MESSAGE_LIMIT
     BEDROCK_LLM_ID = get_parameter(BEDROCK_LLM_PARAM, BEDROCK_LLM_ID)
     # TABLE_NAME might be passed as env var directly for playground to point to specific table
     # But current code tries to fetch from param. 
@@ -91,6 +155,11 @@ def initialize_constants():
         max_tokens_val = get_parameter(BEDROCK_MAX_TOKENS_PARAM, None)
         if max_tokens_val:
             BEDROCK_MAX_TOKENS = int(max_tokens_val)
+
+    if MESSAGE_LIMIT_PARAM:
+        MESSAGE_LIMIT = get_parameter(MESSAGE_LIMIT_PARAM, MESSAGE_LIMIT)
+    if MESSAGE_LIMIT is None:
+        MESSAGE_LIMIT = "Infinity"
 
 
 def get_default_system_prompt():
@@ -180,7 +249,58 @@ def handler(event, context):
     if not test_message:
         logger.error("Playground mode requires message_content")
         return create_response(400, "Missing message_content for playground", event)
-    
+
+    # Resolve the WebSocket endpoint up front so the consent/quota gates below
+    # can surface errors to the client over the same channel.
+    gate_ws_endpoint = os.environ.get("WEBSOCKET_API_ENDPOINT") or f"https://{domain_name}/{stage}"
+
+    def _send_playground_error(content, data=None):
+        try:
+            apigw_client = boto3.client('apigatewaymanagementapi', endpoint_url=gate_ws_endpoint)
+            message = {"action": "playground_test", "type": "error", "requestId": request_id, "content": content}
+            if data is not None:
+                message["data"] = data
+            apigw_client.post_to_connection(
+                ConnectionId=connection_id,
+                Data=json.dumps(message).encode('utf-8'),
+            )
+        except Exception as ws_error:
+            logger.error(f"Failed to send playground gate error to WebSocket: {ws_error}")
+
+    # Consent gate: require the user to have accepted the legal/AI-use waiver
+    # before any billed Bedrock work runs. Playground is not exempt. Fails
+    # closed if the acceptance state cannot be read, mirroring assess_progress.
+    try:
+        conn = connect_to_db()
+        if not is_disclaimer_accepted(conn, user_id):
+            logger.warning(f"Playground blocked: user {user_id} has not accepted the disclaimer")
+            _send_playground_error(
+                "You must accept the disclaimer before using the AI assistant.",
+                data={"code": "DISCLAIMER_NOT_ACCEPTED"},
+            )
+            return {"statusCode": 200}
+    except Exception as e:
+        logger.error(f"Error checking disclaimer acceptance: {e}")
+        _send_playground_error("Service temporarily unavailable. Please try again later.")
+        return {"statusCode": 503}
+
+    # Quota gate: enforce the daily message limit before invoking Bedrock so
+    # playground requests are metered like standard-mode requests. Counts as one
+    # message per request and fails closed if the usage check cannot run.
+    if MESSAGE_LIMIT != "Infinity":
+        try:
+            limit = int(MESSAGE_LIMIT)
+            conn = connect_to_db()
+            current_usage = check_and_increment_usage(conn, user_id)
+            logger.info(f"User {user_id} playground usage: {current_usage}/{limit}")
+            if current_usage > limit:
+                _send_playground_error("Daily message limit reached. Please contact your administrator.")
+                return {"statusCode": 200}
+        except Exception as e:
+            logger.error(f"Error checking message limit: {e}")
+            _send_playground_error("Service temporarily unavailable. Please try again later.")
+            return {"statusCode": 503}
+
     # Apply guardrail to test message input
     try:
         guardrail_id = os.environ.get("GUARDRAIL_ID")

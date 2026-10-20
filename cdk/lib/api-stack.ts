@@ -2021,6 +2021,7 @@ export class ApiGatewayStack extends cdk.Stack {
           BEDROCK_TEMP_PARAM: bedrockTemperatureParameter.parameterName,
           BEDROCK_TOP_P_PARAM: bedrockTopPParameter.parameterName,
           BEDROCK_MAX_TOKENS_PARAM: bedrockMaxTokensParameter.parameterName,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           TABLE_NAME: `${id}-Playground-Table`,
           GUARDRAIL_ID: textGenGuardrail.attrGuardrailId,
           GUARDRAIL_VERSION: textGenGuardrailVersion.attrVersion,
@@ -2075,9 +2076,13 @@ export class ApiGatewayStack extends cdk.Stack {
           bedrockTemperatureParameter.parameterArn,
           bedrockTopPParameter.parameterArn,
           bedrockMaxTokensParameter.parameterArn,
+          messageLimitParameter.parameterArn,
         ],
       }),
     );
+
+    // Allow the playground function to read the shared daily message-limit parameter
+    messageLimitParameter.grantRead(playgroundGenLambdaDockerFunc);
 
     // Ensure it can invoke the guardrail (using text generation guardrail for playground)
     playgroundGenLambdaDockerFunc.addToRolePolicy(
