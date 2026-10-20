@@ -9,10 +9,12 @@ import { Construct } from "constructs";
 import * as yaml from "yaml";
 import { ApiGatewayStack } from "./api-stack";
 import { applyStandardTags } from "./shared/tagging";
+import { isProdEnvironment } from "./shared/environment";
 
 interface AmplifyStackProps extends cdk.StackProps {
   githubRepo: string;
   domainName?: string;
+  frontendOrigin?: string;
 }
 
 export class AmplifyStack extends cdk.Stack {
@@ -29,19 +31,51 @@ export class AmplifyStack extends cdk.Stack {
 
     const githubRepoName = props.githubRepo;
 
-    // Build CSP connect-src directive based on whether a custom domain is configured
+    const isProd = isProdEnvironment(this);
+
+    // Resolve the single concrete frontend origin, mirroring ApiGatewayStack:
+    // a custom domain (bare host) becomes https://<host>; an explicit
+    // frontendOrigin (full URL) is used verbatim with any trailing slash removed.
+    const allowedOrigin = props.domainName
+      ? `https://${props.domainName}`
+      : props.frontendOrigin
+        ? props.frontendOrigin.replace(/\/+$/, "")
+        : "";
+
+    // Reject anything that is not a single concrete https origin, so a malformed
+    // value cannot both pass the prod guard below and corrupt the CSP header.
+    if (
+      allowedOrigin &&
+      !/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(allowedOrigin)
+    ) {
+      throw new Error(
+        `Invalid frontend origin "${allowedOrigin}". Provide a single concrete https origin, e.g. https://app.example.com (pass -c DomainName as a bare host, or -c FrontendOrigin as a full https URL).`,
+      );
+    }
+
+    // Fail closed in production: never serve the permissive connect-src. This is
+    // environment-driven (not truthiness-driven) so an unset DomainName AND
+    // FrontendOrigin cannot silently fall through to the permissive branch.
+    if (isProd && !allowedOrigin) {
+      throw new Error(
+        "A frontend origin is required for production deployments so the CSP connect-src is locked down. Pass -c DomainName=your.domain for a custom domain, or -c FrontendOrigin=https://main.xxxxx.amplifyapp.com to use the Amplify-managed domain.",
+      );
+    }
+
+    // Build the CSP connect-src directive. When a concrete origin is configured
+    // (always true in prod given the guard above), lock it down to the specific
+    // backends the SPA talks to plus the frontend origin itself.
     let connectSrc: string;
-    if (props.domainName) {
-      // Lock down connect-src to specific backends when a custom domain is provided
+    if (allowedOrigin) {
       const apiEndpoint = apiStack.getEndpointUrl();
       const wsUrl = apiStack.getWebSocketUrl();
       const cognitoIdpEndpoint = `https://cognito-idp.${this.region}.amazonaws.com`;
       const cognitoIdentityEndpoint = `https://cognito-identity.${this.region}.amazonaws.com`;
       const audioPromptBucketEndpoint = `https://${apiStack.getAudioPromptBucketName()}.s3.${this.region}.amazonaws.com`;
       const whitelistUploadBucketEndpoint = `https://${apiStack.getWhitelistUploadBucketName()}.s3.${this.region}.amazonaws.com`;
-      connectSrc = `'self' ${apiEndpoint} ${wsUrl} ${cognitoIdpEndpoint} ${cognitoIdentityEndpoint} ${audioPromptBucketEndpoint} ${whitelistUploadBucketEndpoint}`;
+      connectSrc = `'self' ${allowedOrigin} ${apiEndpoint} ${wsUrl} ${cognitoIdpEndpoint} ${cognitoIdentityEndpoint} ${audioPromptBucketEndpoint} ${whitelistUploadBucketEndpoint}`;
     } else {
-      // Permissive connect-src when no custom domain is configured
+      // Only reachable for non-prod deployments with no configured origin.
       connectSrc = "'self' wss: https:";
     }
 
