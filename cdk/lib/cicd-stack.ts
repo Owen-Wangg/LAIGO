@@ -32,6 +32,12 @@ interface CICDStackProps extends cdk.StackProps {
 export class CICDStack extends cdk.Stack {
   // Map of ECR repositories created for each Lambda function
   public readonly ecrRepositories: { [key: string]: ecr.Repository } = {};
+  // Map of SSM parameter names holding the full image URI to deploy per Lambda
+  // function. Each parameter is created here (so it always exists before ApiStack
+  // reads it) and overwritten by the pipeline with the scan-approved `@sha256:`
+  // digest URI on every build, so `cdk deploy` reflects the latest scanned image
+  // instead of resetting the functions to the one-time `bootstrap` tag.
+  public readonly imageUriParameterNames: { [key: string]: string } = {};
 
   constructor(scope: Construct, id: string, props: CICDStackProps) {
     super(scope, id, props);
@@ -154,6 +160,32 @@ export class CICDStack extends cdk.Stack {
       this.ecrRepositories[lambda.name] = ecrRepo;
       cdk.Tags.of(ecrRepo).add("module", lambda.name); // Resource-specific tag (not part of global standard set)
 
+      // SSM parameter that holds the full image URI ApiStack should deploy for
+      // this function. Created here with CloudFormation so it always exists
+      // before ApiStack resolves it (ApiStack depends on this stack) — this is
+      // what prevents the "Unable to fetch parameters" deploy failure. The value
+      // is seeded to the bootstrap tag URI and left static in the template, so
+      // CloudFormation sets it only on create and never clobbers the digest URI
+      // the pipeline publishes below on subsequent deploys.
+      const imageUriParamName = `/${id}/image-uri/${lambda.name}`;
+      this.imageUriParameterNames[lambda.name] = imageUriParamName;
+      new cdk.aws_ssm.StringParameter(this, `${lambda.name}ImageUriParam`, {
+        parameterName: imageUriParamName,
+        stringValue: ecrRepo.repositoryUriForTag("bootstrap"),
+        description: `Full ECR image URI deployed for the ${lambda.name} Lambda. Overwritten by the pipeline with the scan-approved digest on each build.`,
+      });
+
+      // Allow the build to publish the resolved digest URI for this function only.
+      codeBuildRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["ssm:PutParameter"],
+          resources: [
+            `arn:aws:ssm:${this.region}:${this.account}:parameter${imageUriParamName}`,
+          ],
+        }),
+      );
+
       // Create CodeBuild project for building Docker images
       const buildProject = new codebuild.PipelineProject(
         this,
@@ -183,6 +215,7 @@ export class CICDStack extends cdk.Stack {
             PATH_FILTER: { value: lambda.sourceDir }, // Directory to monitor for changes
             BLOCKING_SEVERITIES: { value: "CRITICAL HIGH" }, // Finding severities that block deployment
             SCAN_TIMEOUT_SECONDS: { value: "300" }, // Max time to wait for scan completion
+            IMAGE_URI_PARAM_NAME: { value: imageUriParamName }, // SSM parameter ApiStack reads to pin the scanned image URI
           },
           // Build specification defining the build process
           buildSpec: codebuild.BuildSpec.fromObject({
@@ -301,6 +334,16 @@ export class CICDStack extends cdk.Stack {
                       exit 1
                     fi
                     echo "Resolved image digest: $IMAGE_DIGEST"
+                    # Publish the scan-approved digest URI so a future "cdk deploy"
+                    # of ApiStack pins this exact image instead of resetting the
+                    # function to the one-time bootstrap tag. Written every build so
+                    # CloudFormation always resolves the latest scanned image.
+                    echo "Publishing image URI to SSM parameter $IMAGE_URI_PARAM_NAME..."
+                    aws ssm put-parameter \
+                      --name "$IMAGE_URI_PARAM_NAME" \
+                      --type String \
+                      --value "$REPOSITORY_URI@$IMAGE_DIGEST" \
+                      --overwrite
                     echo "Checking if Lambda function exists before updating..."
                     if aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME &>/dev/null; then
                       echo "Updating Lambda function to use the scanned image digest..."

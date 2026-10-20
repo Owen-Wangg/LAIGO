@@ -40,6 +40,7 @@ import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 // Stack properties for API Gateway configuration
 interface ApiGatewayStackProps extends cdk.StackProps {
   ecrRepositories: { [key: string]: ecr.Repository }; // ECR repositories for Lambda Docker images
+  imageUriParameterNames?: { [key: string]: string }; // SSM parameter names holding the full scan-approved image URI per Docker function
   domainName?: string; // Optional custom domain (host only) registered in Amplify and used as the CORS origin
   frontendOrigin?: string; // Optional explicit frontend origin (full URL) for CORS lockdown without registering an Amplify custom domain
   sesVerifiedDomain?: string; // Optional SES verified domain for Cognito email (independent of domainName)
@@ -1940,6 +1941,19 @@ export class ApiGatewayStack extends cdk.Stack {
       .defaultChild as lambda.CfnFunction;
     cfnTextGenDockerFunc.overrideLogicalId("TextGenLambdaDockerFunc");
 
+    // Deploy the scan-approved image published by the pipeline. The parameter is
+    // created by CICDStack (so it always exists here) and resolved at deploy time,
+    // so `cdk deploy` reflects the latest scanned image instead of resetting the
+    // function to the one-time `bootstrap` tag used only for cold-create.
+    const textGenImageUriParam =
+      props.imageUriParameterNames?.["textGeneration"];
+    if (textGenImageUriParam) {
+      cfnTextGenDockerFunc.addPropertyOverride(
+        "Code.ImageUri",
+        ssm.StringParameter.valueForStringParameter(this, textGenImageUriParam),
+      );
+    }
+
     // Add the permission to the Lambda function's policy to allow API Gateway access
     textGenLambdaDockerFunc.addPermission("AllowApiGatewayInvoke", {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
@@ -2021,6 +2035,19 @@ export class ApiGatewayStack extends cdk.Stack {
     cfnPlaygroundGenDockerFunc.overrideLogicalId(
       "PlaygroundTextGenLambdaDockerFunc",
     );
+
+    // Deploy the scan-approved image published by the pipeline (see textGen above).
+    const playgroundImageUriParam =
+      props.imageUriParameterNames?.["playgroundGeneration"];
+    if (playgroundImageUriParam) {
+      cfnPlaygroundGenDockerFunc.addPropertyOverride(
+        "Code.ImageUri",
+        ssm.StringParameter.valueForStringParameter(
+          this,
+          playgroundImageUriParam,
+        ),
+      );
+    }
 
     // Add permissions
     playgroundGenLambdaDockerFunc.addPermission("AllowApiGatewayInvoke", {

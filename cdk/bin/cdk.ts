@@ -77,6 +77,7 @@ const cicd = new CICDStack(app, `${StackPrefix}-CICDStack`, {
 const api = new ApiGatewayStack(app, `${StackPrefix}-ApiStack`, db, vpc, {
   env,
   ecrRepositories: cicd.ecrRepositories,
+  imageUriParameterNames: cicd.imageUriParameterNames,
   domainName: domainName,
   frontendOrigin: frontendOrigin,
   sesVerifiedDomain: sesVerifiedDomain,
