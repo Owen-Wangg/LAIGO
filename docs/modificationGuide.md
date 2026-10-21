@@ -305,7 +305,7 @@ Example (`NodeJS` lambda):
 
 ```typescript
 const myHandler = new lambda.Function(this, `${id}-MyHandler`, {
-  runtime: lambda.Runtime.NODEJS_22_X,
+  runtime: lambda.Runtime.NODEJS_24_X,
   code: lambda.Code.fromAsset("lambda"),
   handler: "handlers/myHandler.handler",
   environment: {

@@ -1842,7 +1842,7 @@ else (public mode):                    role = "student"
 
 | Property | Pre-Signup | Post-Confirmation |
 |----------|-----------|-------------------|
-| Runtime | Node.js 22.x | Node.js 22.x |
+| Runtime | Node.js 24.x | Node.js 24.x |
 | Timeout | 10 seconds | 29 seconds |
 | Memory | 128 MB | 256 MB |
 | VPC | No (public) | Yes (private subnet with NAT) |

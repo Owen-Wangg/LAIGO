@@ -1575,10 +1575,10 @@ WebSocket handlers communicate with DynamoDB and API Gateway Management API via 
 | API Gateway (WebSocket) | TLS 1.2 | AWS default for WebSocket API endpoints | ✓ Adequate |
 | RDS Proxy | TLS 1.2 | AWS RDS Proxy only supports TLS 1.2+ | ✓ Adequate |
 | RDS PostgreSQL 17 | TLS 1.2 | PostgreSQL 17 on RDS uses TLS 1.2 minimum by default; `ssl_min_protocol_version` not explicitly set but defaults to TLSv1.2 on modern RDS | ✓ Adequate |
-| AWS SDK (Node.js v3) | TLS 1.2 | Node.js 22.x runtime uses OpenSSL 3.x which defaults to TLS 1.2 minimum | ✓ Adequate |
+| AWS SDK (Node.js v3) | TLS 1.2 | Node.js 24.x runtime uses OpenSSL 3.x which defaults to TLS 1.2 minimum | ✓ Adequate |
 | AWS SDK (boto3/Python 3.12) | TLS 1.2 | Python 3.12 ssl module defaults to TLS 1.2 minimum | ✓ Adequate |
 
-**Assessment:** No layer permits TLS versions below 1.2. The platform meets the TLS 1.2 minimum requirement across all communication paths without requiring explicit configuration, due to the modern runtime versions (Node.js 22.x, Python 3.12) and AWS service defaults.
+**Assessment:** No layer permits TLS versions below 1.2. The platform meets the TLS 1.2 minimum requirement across all communication paths without requiring explicit configuration, due to the modern runtime versions (Node.js 24.x, Python 3.12) and AWS service defaults.
 
 ### 6.6 RDS CA Bundle and Rotation
 
@@ -1591,7 +1591,7 @@ WebSocket handlers communicate with DynamoDB and API Gateway Management API via 
 
 **RDS CA Certificate Chain:**
 - RDS instances in this deployment use the `rds-ca-rsa2048-g1` certificate authority (AWS default for new instances created after January 2024)
-- The Amazon Root CA that signs RDS certificates is included in the default system CA stores of both Node.js 22.x and Python 3.12 Lambda runtimes
+- The Amazon Root CA that signs RDS certificates is included in the default system CA stores of both Node.js 24.x and Python 3.12 Lambda runtimes
 - This means certificate validation WORKS without explicit CA bundle configuration — but only for functions that don't disable it
 
 **Rotation Handling:**
@@ -1715,7 +1715,7 @@ WebSocket handlers communicate with DynamoDB and API Gateway Management API via 
 - **Section:** 6. Transport Security Assessment
 - **Current State:** No Lambda function explicitly references the AWS RDS CA bundle file (`rds-combined-ca-bundle.pem` or `global-bundle.pem`) in its connection configuration. Certificate validation (where enabled) relies on the Lambda runtime's system CA store.
 - **Gap:** Relying on the system CA store is broader than necessary — it trusts all CAs in the bundle, not just the Amazon Root CA that signs RDS certificates. Pinning to the specific RDS CA bundle would provide a tighter trust anchor.
-- **Risk:** Minimal practical risk. The system CA stores in AWS Lambda runtimes (Node.js 22.x, Python 3.12) are maintained by AWS and include the correct Amazon Root CAs. The broader trust surface is a theoretical concern — an attacker would need a certificate signed by ANY trusted CA for the RDS Proxy hostname, which is an internal VPC DNS name that no public CA would issue certificates for.
+- **Risk:** Minimal practical risk. The system CA stores in AWS Lambda runtimes (Node.js 24.x, Python 3.12) are maintained by AWS and include the correct Amazon Root CAs. The broader trust surface is a theoretical concern — an attacker would need a certificate signed by ANY trusted CA for the RDS Proxy hostname, which is an internal VPC DNS name that no public CA would issue certificates for.
 - **Recommendation:** For functions that perform certificate validation (authorizers, and REST handlers after NW-H1 remediation), consider adding explicit CA bundle reference as a hardening measure:
   - Node.js: Include `/opt/rds-combined-ca-bundle.pem` via a Lambda layer and set `ssl: { ca: fs.readFileSync('/opt/rds-combined-ca-bundle.pem') }`
   - Python: Set `sslrootcert=/opt/rds-combined-ca-bundle.pem` in connection params
