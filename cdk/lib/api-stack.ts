@@ -2804,6 +2804,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // Helper: encrypted, SSL-enforced SQS DLQ with a depth alarm so failed
     // async invocations and dropped events are captured and replayable instead
     // of being silently lost.
+    // DLQ depth alarms are collected here and wired to the security alerts SNS
+    // topic once it is created (in the Security Monitoring section below), so
+    // they notify on the same channel as the other security alarms.
+    const dlqDepthAlarms: cloudwatch.Alarm[] = [];
     const makeDeadLetterQueue = (name: string): sqs.Queue => {
       const dlq = new sqs.Queue(this, `${id}-${name}`, {
         queueName: `${id}-${name}`,
@@ -2814,7 +2818,7 @@ export class ApiGatewayStack extends cdk.Stack {
           ? cdk.RemovalPolicy.RETAIN
           : cdk.RemovalPolicy.DESTROY,
       });
-      new cloudwatch.Alarm(this, `${id}-${name}-DepthAlarm`, {
+      const depthAlarm = new cloudwatch.Alarm(this, `${id}-${name}-DepthAlarm`, {
         alarmName: `${id}-${name}-DepthAlarm`,
         alarmDescription: `Messages present in ${id}-${name} dead-letter queue`,
         metric: dlq.metricApproximateNumberOfMessagesVisible({
@@ -2827,6 +2831,7 @@ export class ApiGatewayStack extends cdk.Stack {
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       });
+      dlqDepthAlarms.push(depthAlarm);
       return dlq;
     };
 
@@ -3016,6 +3021,11 @@ export class ApiGatewayStack extends cdk.Stack {
     }
 
     const snsAlarmAction = new cloudwatchActions.SnsAction(securityAlertsTopic);
+
+    // Wire the DLQ depth alarms (created earlier) to the security alerts topic.
+    for (const dlqAlarm of dlqDepthAlarms) {
+      dlqAlarm.addAlarmAction(snsAlarmAction);
+    }
 
     // Allow the admin function to publish notifications about admin role
     // changes to the security alerts topic, scoped to this topic only.
