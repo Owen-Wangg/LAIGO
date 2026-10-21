@@ -38,8 +38,6 @@ exports.handler = async (event, context) => {
       roles,
     };
 
-    const userEmail = user.email;
-
     // Check roles from context
     const isAdmin = user.roles.includes("admin");
     const isInstructor = user.roles.includes("instructor");
@@ -121,9 +119,9 @@ exports.handler = async (event, context) => {
 
       // RBAC Check: Only admin and instructor can use playground features
       if (!isStaff) {
+        // Log identifiers only — never the user's email (PII).
         logger.warn("Unauthorized playground access attempt", {
           userId,
-          userEmail,
           roles: user.roles,
         });
         return {
@@ -222,9 +220,9 @@ exports.handler = async (event, context) => {
 
       // RBAC Check: Only admin and instructor can use playground features
       if (!isStaff) {
+        // Log identifiers only — never the user's email (PII).
         logger.warn("Unauthorized playground assessment attempt", {
           userId,
-          userEmail,
           roles: user.roles,
         });
         return {
