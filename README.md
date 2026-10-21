@@ -155,5 +155,5 @@ Licenses of libraries and tools used by the system are listed below:
 
 [Anthropic Acceptable Use Policy](https://www.anthropic.com/legal/aup)
 
-- For Claude Sonnet 5, accessed via AWS Bedrock
+- For Claude Sonnet 5.5, accessed via AWS Bedrock
 - Usage governed by the [AWS Bedrock Service Terms](https://aws.amazon.com/service-terms/) and Anthropic's Acceptable Use Policy

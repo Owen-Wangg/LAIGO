@@ -91,8 +91,8 @@ interface ModelOption {
 
 const FALLBACK_AVAILABLE_MODELS: ModelOption[] = [
   {
-    id: "us.anthropic.claude-sonnet-5",
-    name: "Claude Sonnet 5",
+    id: "us.anthropic.claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5",
     constraints: {
       maxOutputTokens: 128000,
       defaultMaxOutputTokens: 4096,

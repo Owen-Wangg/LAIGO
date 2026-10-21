@@ -365,7 +365,7 @@ After making the required changes in the fork created in the [Deployment Guide](
   ```
 
   - **Foundation models** (e.g., `meta.llama3-70b-instruct-v1:0`) use the `foundation-model` ARN pattern.
-  - **Cross-region inference profiles** (e.g., `us.anthropic.claude-sonnet-5`) use the `inference-profile` ARN pattern and allow Bedrock to route requests across regions for improved availability.
+  - **Cross-region inference profiles** (e.g., `us.anthropic.claude-sonnet-5-5`) use the `inference-profile` ARN pattern and allow Bedrock to route requests across regions for improved availability.
 
   - After making these changes, redeploy the application by using the `cdk deploy` command in the deployment guide.
 

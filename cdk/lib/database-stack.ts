@@ -213,6 +213,13 @@ export class DatabaseStack extends Stack {
 
     targetGroup.addPropertyOverride("TargetGroupName", "default");
 
+    // AWS::RDS::DBProxyTargetGroup does not support a Tags property. CDK's global
+    // tag aspect still propagates stack tags onto this L1 resource, which newer
+    // aws-cdk-lib versions flag during synth-time CloudFormation schema validation
+    // ("'Tags' was unexpected"). Remove the unsupported property so synth is clean
+    // and the template cannot be rejected at deploy time.
+    targetGroup.addPropertyDeletionOverride("Tags");
+
     // Grant the proxy role permission to connect to the database instance
     this.dbInstance.grantConnect(rdsProxyRole);
 
