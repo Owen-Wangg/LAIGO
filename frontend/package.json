@@ -17,7 +17,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "aws-amplify": "^6.22.2",
     "dompurify": "^3.4.17",
-    "dotenv": "^17.3.1",
+    "dotenv": "^18.0.8",
     "html2pdf.js": "^0.14.0",
     "jspdf": "^4.2.1",
     "marked": "^18.1.1",
