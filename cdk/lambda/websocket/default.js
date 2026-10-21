@@ -2,6 +2,7 @@ const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
 const {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
+  DeleteConnectionCommand,
 } = require("@aws-sdk/client-apigatewaymanagementapi");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "WsDefault" });
@@ -27,6 +28,54 @@ exports.handler = async (event, context) => {
     timestamp: new Date().toISOString(),
     userId,
   });
+
+  // Enforce a maximum session lifetime (finding M3). The WebSocket authorizer
+  // runs only at $connect, so authorization captured there would otherwise live
+  // for the whole socket. Once a connection exceeds its lifetime we force-close
+  // it; the client's reconnect re-runs the authorizer and re-validates roles.
+  const maxSessionSeconds = parseInt(
+    process.env.WS_MAX_SESSION_SECONDS || "1800",
+    10,
+  );
+  const connectedAt = event.requestContext.connectedAt; // epoch ms
+  const nowEpoch = event.requestContext.requestTimeEpoch || Date.now();
+  if (
+    connectedAt &&
+    nowEpoch - connectedAt > maxSessionSeconds * 1000
+  ) {
+    logger.info("WebSocket session exceeded max lifetime; forcing reconnect", {
+      connectionId,
+      userId,
+      sessionAgeSeconds: Math.floor((nowEpoch - connectedAt) / 1000),
+      maxSessionSeconds,
+    });
+    const apigw = new ApiGatewayManagementApiClient({
+      endpoint: `https://${domainName}/${stage}`,
+    });
+    try {
+      await apigw.send(
+        new PostToConnectionCommand({
+          ConnectionId: connectionId,
+          Data: JSON.stringify({
+            type: "session_expired",
+            code: "SESSION_EXPIRED",
+            content: "Your session has expired. Please reconnect to continue.",
+          }),
+        }),
+      );
+    } catch (notifyError) {
+      // Best effort — the client may already be gone.
+      logger.warn("Failed to notify client of session expiry");
+    }
+    try {
+      await apigw.send(
+        new DeleteConnectionCommand({ ConnectionId: connectionId }),
+      );
+    } catch (closeError) {
+      logger.warn("Failed to close expired WebSocket connection");
+    }
+    return { statusCode: 200 };
+  }
 
   try {
     // Build user object from context

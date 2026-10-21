@@ -2460,6 +2460,14 @@ export class ApiGatewayStack extends cdk.Stack {
     // WebSocket API for Chat Streaming
     // ========================================
 
+    // Max WebSocket session lifetime (finding M3). The API Gateway authorizer
+    // runs only at $connect, so a connection's authorization (roles) would
+    // otherwise persist for the socket's whole life. Capping the lifetime forces
+    // periodic reconnects, which re-run the authorizer and pick up revoked
+    // roles. Lowered from the previous 2h. The $connect TTL (DynamoDB cleanup)
+    // and the $default enforcement window are kept in sync from this value.
+    const wsSessionTtlSeconds = 30 * 60; // 30 minutes
+
     // Lambda for $connect route - stores connection mapping
     // No longer needs database access - receives userId from authorizer context
     const wsConnectFunction = new lambda.Function(
@@ -2477,6 +2485,7 @@ export class ApiGatewayStack extends cdk.Stack {
         environment: {
           CONNECTION_TABLE_NAME: connectionTable.tableName,
           MAX_CONNECTIONS_PER_USER: "5",
+          CONNECTION_TTL_SECONDS: wsSessionTtlSeconds.toString(),
         },
       },
     );
@@ -2548,6 +2557,7 @@ export class ApiGatewayStack extends cdk.Stack {
           AUDIO_TO_TEXT_FUNCTION_NAME: audioToTextFunction.functionName,
           PLAYGROUND_GEN_FUNCTION_NAME:
             playgroundGenLambdaDockerFunc.functionName,
+          WS_MAX_SESSION_SECONDS: wsSessionTtlSeconds.toString(),
         },
       },
     );
@@ -2634,6 +2644,9 @@ export class ApiGatewayStack extends cdk.Stack {
         actions: ["execute-api:ManageConnections"],
         resources: [
           `arn:aws:execute-api:${this.region}:${this.account}:${this.wsApi.apiId}/${this.wsStage.stageName}/POST/@connections/*`,
+          // DELETE is used to force-close sessions past their max lifetime so
+          // the client reconnects and the authorizer re-runs (finding M3).
+          `arn:aws:execute-api:${this.region}:${this.account}:${this.wsApi.apiId}/${this.wsStage.stageName}/DELETE/@connections/*`,
         ],
       }),
     );

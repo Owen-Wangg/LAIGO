@@ -53,7 +53,13 @@ exports.handler = async (event) => {
         };
       }
 
-      const ttl = Math.floor(Date.now() / 1000) + 2 * 60 * 60; // 2 hours from now
+      // Connection TTL governs DynamoDB cleanup and is kept in sync with the
+      // $default max-session enforcement window. Lowered from 2h (finding M3).
+      const ttlSeconds = parseInt(
+        process.env.CONNECTION_TTL_SECONDS || "1800",
+        10,
+      );
+      const ttl = Math.floor(Date.now() / 1000) + ttlSeconds;
       const connectedAt = new Date().toISOString();
 
       await dynamodb.send(
