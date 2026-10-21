@@ -3,6 +3,8 @@ import * as cdk from "aws-cdk-lib";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as destinations from "aws-cdk-lib/aws-lambda-destinations";
+import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import { Construct } from "constructs";
@@ -2775,6 +2777,59 @@ export class ApiGatewayStack extends cdk.Stack {
       }),
     );
 
+    // ========================================
+    // Dead-letter queues for async / event-driven paths (finding H5)
+    // ========================================
+    // Helper: encrypted, SSL-enforced SQS DLQ with a depth alarm so failed
+    // async invocations and dropped events are captured and replayable instead
+    // of being silently lost.
+    const makeDeadLetterQueue = (name: string): sqs.Queue => {
+      const dlq = new sqs.Queue(this, `${id}-${name}`, {
+        queueName: `${id}-${name}`,
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
+        retentionPeriod: Duration.days(14),
+        removalPolicy: isProd
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+      });
+      new cloudwatch.Alarm(this, `${id}-${name}-DepthAlarm`, {
+        alarmName: `${id}-${name}-DepthAlarm`,
+        alarmDescription: `Messages present in ${id}-${name} dead-letter queue`,
+        metric: dlq.metricApproximateNumberOfMessagesVisible({
+          period: Duration.minutes(5),
+          statistic: "Maximum",
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      return dlq;
+    };
+
+    // DLQ for the generation Lambdas invoked asynchronously (InvocationType:
+    // "Event") by the WebSocket default handler. After retries, failed events
+    // land here via the onFailure destination.
+    const asyncInvokeDlq = makeDeadLetterQueue("AsyncInvokeDLQ");
+    for (const fn of [
+      textGenLambdaDockerFunc,
+      playgroundGenLambdaDockerFunc,
+      assessProgressFunction,
+      audioToTextFunction,
+      summaryGenerationFunction,
+    ]) {
+      fn.configureAsyncInvoke({
+        onFailure: new destinations.SqsDestination(asyncInvokeDlq),
+        retryAttempts: 2,
+      });
+    }
+
+    // DLQ for the EventBridge notification target so undeliverable notification
+    // events are retained rather than dropped.
+    const notificationDlq = makeDeadLetterQueue("NotificationDLQ");
+
     // Create EventBridge rule for notification events
     new events.Rule(this, `${id}-NotificationRule`, {
       eventBus: notificationEventBus,
@@ -2787,7 +2842,12 @@ export class ApiGatewayStack extends cdk.Stack {
           "Case Submitted",
         ],
       },
-      targets: [new targets.LambdaFunction(notificationServiceFunction)],
+      targets: [
+        new targets.LambdaFunction(notificationServiceFunction, {
+          deadLetterQueue: notificationDlq,
+          retryAttempts: 2,
+        }),
+      ],
     });
 
     // Grant API Gateway permission to invoke the notification service
