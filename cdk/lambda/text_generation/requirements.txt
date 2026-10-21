@@ -113,7 +113,7 @@ langgraph-prebuilt==1.0.8
     # via langgraph
 langgraph-sdk==0.3.9
     # via langgraph
-langsmith==0.8.0
+langsmith==0.8.18
     # via
     #   langchain-classic
     #   langchain-community
@@ -223,6 +223,8 @@ uuid-utils==0.14.1
     # via
     #   langchain-core
     #   langsmith
+websockets==17.3
+    # via langsmith
 wrapt==2.1.2
     # via
     #   aws-encryption-sdk
