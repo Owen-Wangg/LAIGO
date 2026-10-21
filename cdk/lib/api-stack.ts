@@ -1455,6 +1455,7 @@ export class ApiGatewayStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: "ttl",
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -1485,6 +1486,9 @@ export class ApiGatewayStack extends cdk.Stack {
         },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         encryption: dynamodb.TableEncryption.AWS_MANAGED,
+        // PITR: the whitelist drives signup access control, so loss/corruption
+        // has a security and availability impact (finding M4).
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       },
     );
