@@ -391,12 +391,15 @@ def handler(event, context):
     if not case_id:
         return create_response(400, "Missing required parameters: case_id", event)
 
-    # Unified Identity Extraction
-    # Prefer explicit payload userId (used by websocket invocations),
-    # then fall back to HTTP API authorizer context.
-    user_id = event.get("userId")
+    # Unified Identity Extraction (finding L4)
+    # Prefer the HTTP API authorizer context as the trusted identity source.
+    # Only fall back to the payload userId for WebSocket invocations, where the
+    # async Lambda event carries no authorizer context and default.js sets userId
+    # server-side from its own authorizer (never from client input). This way a
+    # client-supplied userId can never override the authorizer on the HTTP path.
+    user_id = request_context.get("authorizer", {}).get("userId")
     if not user_id:
-        user_id = request_context.get("authorizer", {}).get("userId")
+        user_id = event.get("userId")
 
     # Unified Authorization Check — must run before any case content is loaded,
     # logged, or sent to Bedrock so callers cannot probe cases they do not own.
