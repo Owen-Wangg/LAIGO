@@ -17,7 +17,7 @@ updates:
       - "/cdk/layers/postgres"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 20
     labels:
       - "dependencies"
       - "javascript"
@@ -38,7 +38,7 @@ updates:
       - "/cdk/layers/psycopg3"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 20
     labels:
       - "dependencies"
       - "python"
@@ -48,18 +48,3 @@ updates:
         update-types:
           - "minor"
           - "patch"
-
-  # ---------------------------------------------------------------------------
-  # GitHub Actions workflows
-  # ---------------------------------------------------------------------------
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    labels:
-      - "dependencies"
-      - "github-actions"
-    groups:
-      github-actions:
-        patterns:
-          - "*"
