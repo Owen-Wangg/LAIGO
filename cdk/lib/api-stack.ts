@@ -2158,14 +2158,13 @@ export class ApiGatewayStack extends cdk.Stack {
     playgroundTable.grantReadData(assessProgressFunction);
     assessProgressFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // Grant guardrail permissions to assessProgressFunction
-    assessProgressFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["bedrock:InvokeGuardrail", "bedrock:ApplyGuardrail"],
-        resources: [textGenGuardrail.attrGuardrailArn],
-      }),
-    );
+    // NOTE: No guardrail grant for assessProgressFunction (finding M5). It has
+    // no GUARDRAIL_ID/VERSION and never calls apply_guardrail — it only assesses
+    // conversation content already validated by the text_generation input
+    // guardrail at ingestion. Re-applying the PII-blocking guardrail here would
+    // falsely block legitimate legal content (e.g. party names in prior AI
+    // output, which is not output-guardrailed by design — see H1), so the unused
+    // bedrock:*Guardrail grant is removed to keep least privilege.
 
     assessProgressFunction.addToRolePolicy(
       new iam.PolicyStatement({
@@ -2432,14 +2431,11 @@ export class ApiGatewayStack extends cdk.Stack {
     // Grant access to Bedrock (using shared policy with specific model ARNs)
     summaryGenerationFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // Grant guardrail permissions to summaryGenerationFunction
-    summaryGenerationFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["bedrock:InvokeGuardrail", "bedrock:ApplyGuardrail"],
-        resources: [textGenGuardrail.attrGuardrailArn],
-      }),
-    );
+    // NOTE: No guardrail grant for summaryGenerationFunction (finding M5). Same
+    // rationale as assessProgressFunction above — it summarizes already-validated
+    // conversation content, has no GUARDRAIL_ID/VERSION, and never calls
+    // apply_guardrail. The unused bedrock:*Guardrail grant is removed (least
+    // privilege); re-applying PII blocking here would falsely block legal names.
 
     // Grant EventBridge permissions for notification publishing
     summaryGenerationFunction.addToRolePolicy(
