@@ -2010,6 +2010,8 @@ export class ApiGatewayStack extends cdk.Stack {
         timeout: cdk.Duration.seconds(120),
         reservedConcurrentExecutions: reservedConcurrency.playground,
         vpc: vpcStack.vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [dbClientSg],
         functionName: `${id}-PlaygroundTextGenLambdaDockerFunction`,
         tracing: lambda.Tracing.ACTIVE,
         environment: {
