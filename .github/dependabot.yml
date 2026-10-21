@@ -1,0 +1,50 @@
+# Dependabot version updates
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Minor/patch updates are grouped into a single PR per ecosystem to cut noise;
+# major bumps stay as individual PRs so breaking changes can be reviewed one at a time.
+version: 2
+updates:
+  # ---------------------------------------------------------------------------
+  # JavaScript / TypeScript (npm)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "npm"
+    directories:
+      - "/frontend"
+      - "/cdk"
+      - "/cdk/layers/aws-jwt-verify"
+      - "/cdk/layers/node-pg-migrate"
+      - "/cdk/layers/postgres"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "javascript"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---------------------------------------------------------------------------
+  # Python (pip / requirements.txt)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "pip"
+    directories:
+      - "/cdk/lambda/playground_generation"
+      - "/cdk/lambda/text_generation"
+      - "/cdk/layers/psycopg3"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      pip-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
