@@ -32,6 +32,7 @@ export class DBFlowStack extends Stack {
     db.secretPathTableCreator.grantRead(lambdaRole);
     db.secretPathTableCreator.grantWrite(lambdaRole);
 
+    // Scope logs to this function's own log group rather than all log groups.
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -41,7 +42,10 @@ export class DBFlowStack extends Stack {
           "logs:CreateLogStream",
           "logs:PutLogEvents",
         ],
-        resources: ["arn:aws:logs:*:*:*"],
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-initializerFunction`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-initializerFunction:*`,
+        ],
       }),
     );
 
@@ -60,10 +64,9 @@ export class DBFlowStack extends Stack {
       }),
     );
 
-    // Add additional managed policies
-    lambdaRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMReadOnlyAccess"),
-    );
+    // NOTE: AmazonSSMReadOnlyAccess was removed — the db_setup function reads
+    // its credentials from Secrets Manager (granted above) and does not call
+    // SSM, so the account-wide SSM read grant was unused (least privilege).
 
     // Create a Lambda layer for node-pg-migrate
     const nodePgMigrateLayer = new lambda.LayerVersion(

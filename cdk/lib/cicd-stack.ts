@@ -51,12 +51,10 @@ export class CICDStack extends cdk.Stack {
       assumedBy: new iam.ServicePrincipal("codebuild.amazonaws.com"),
     });
 
-    // Grant ECR permissions for pushing/pulling Docker images
-    codeBuildRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName(
-        "AmazonEC2ContainerRegistryPowerUser",
-      ),
-    );
+    // ECR push/pull is granted per-repository inside the forEach loop below
+    // (ecrRepo.grantPullPush + ecr:DescribeImages), scoped to this project's
+    // repos only, instead of the account-wide AmazonEC2ContainerRegistryPowerUser
+    // managed policy (least privilege).
 
     // Grant Lambda permissions for updating function code and configuration
     codeBuildRole.addToPolicy(
@@ -155,6 +153,13 @@ export class CICDStack extends cdk.Stack {
           },
         }),
       );
+
+      // Grant the shared CodeBuild role scoped push/pull on THIS repo only
+      // (grantPullPush also grants ecr:GetAuthorizationToken on *, which is an
+      // account-level action). DescribeImages is needed by the buildspec's
+      // `aws ecr describe-images` change-detection check.
+      ecrRepo.grantPullPush(codeBuildRole);
+      ecrRepo.grant(codeBuildRole, "ecr:DescribeImages");
 
       // Store repository reference and add resource-specific tags
       this.ecrRepositories[lambda.name] = ecrRepo;

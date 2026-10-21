@@ -1010,7 +1010,13 @@ export class ApiGatewayStack extends cdk.Stack {
           "logs:CreateLogStream",
           "logs:PutLogEvents",
         ],
-        resources: ["arn:aws:logs:*:*:*"],
+        // Scope to the two Cognito-trigger functions' own log groups.
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-preSignupLambda`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-preSignupLambda:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-addStudentOnSignUp`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-addStudentOnSignUp:*`,
+        ],
       }),
     );
 
@@ -2941,9 +2947,17 @@ export class ApiGatewayStack extends cdk.Stack {
           },
           physicalResourceId: cr.PhysicalResourceId.of("BedrockLoggingConfig"),
         },
-        policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-          resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
-        }),
+        // Grant only the single SDK action this custom resource calls instead
+        // of the auto-derived ANY_RESOURCE wildcard. putModelInvocationLogging-
+        // Configuration is an account-level Bedrock setting that does not
+        // support resource-level ARNs, so "*" is required for the resource.
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            effect: iam.Effect.ALLOW,
+            actions: ["bedrock:PutModelInvocationLoggingConfiguration"],
+            resources: ["*"],
+          }),
+        ]),
       },
     );
     enableBedrockLogging.node.addDependency(
