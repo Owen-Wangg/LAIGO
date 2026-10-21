@@ -1500,8 +1500,10 @@ export class ApiGatewayStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
       lifecycleRules: [{ expiration: cdk.Duration.days(90), id: "expire-old-logs" }],
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      // Gate on environment like the other stateful buckets (finding L5) so
+      // audit logs are not destroyed on stack delete in production.
+      removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: !isProd,
     });
 
     // S3 bucket for whitelist CSV uploads (avoids WAF body-size restrictions)
