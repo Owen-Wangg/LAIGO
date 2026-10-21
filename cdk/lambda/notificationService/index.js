@@ -58,20 +58,98 @@ exports.handler = async (event, context) => {
 async function handleEventBridgeEvent(event) {
   const { detail } = event;
   const eventType = event["detail-type"];
+  const eventId = event.id; // Stable across EventBridge redeliveries of the same event
 
   logger.info("Processing EventBridge event", {
     eventType,
+    eventId,
     recipientId: detail.recipientId, // Database user_id
     notificationType: detail.type,
   });
 
-  // Create notification record
-  const notification = await createNotification(detail);
+  // Idempotency (finding M6): EventBridge delivery is at-least-once, so the same
+  // event can be delivered more than once. Claim the event id with a conditional
+  // write; if it's already claimed, this is a redelivery and we skip to avoid a
+  // duplicate notification.
+  const claimed = await claimEventForProcessing(eventId);
+  if (!claimed) {
+    logger.info("Duplicate EventBridge event ignored (idempotency)", {
+      eventId,
+      eventType,
+    });
+    return { statusCode: 200 };
+  }
 
-  // Attempt real-time delivery via WebSocket
-  await deliverNotificationViaWebSocket(notification);
+  try {
+    // Create notification record
+    const notification = await createNotification(detail);
+
+    // Attempt real-time delivery via WebSocket
+    await deliverNotificationViaWebSocket(notification);
+  } catch (error) {
+    // Release the claim so a retry (or DLQ replay) can reprocess this event
+    // rather than being permanently suppressed by the idempotency marker.
+    await releaseEventClaim(eventId);
+    throw error;
+  }
 
   return { statusCode: 200 };
+}
+
+/**
+ * Attempt to claim an EventBridge event id for processing using a conditional
+ * write. Returns true if this invocation won the claim (first time seen), false
+ * if the event was already processed (redelivery). A missing id disables dedup
+ * (returns true) so processing still proceeds.
+ */
+async function claimEventForProcessing(eventId) {
+  if (!eventId) {
+    logger.warn("EventBridge event has no id; idempotency dedup skipped");
+    return true;
+  }
+  const ttl = Math.floor(Date.now() / 1000) + 24 * 60 * 60; // 24h dedup window
+  try {
+    await dynamodb.send(
+      new PutItemCommand({
+        TableName: process.env.NOTIFICATION_TABLE_NAME,
+        Item: marshall({
+          PK: `IDEMPOTENCY#${eventId}`,
+          SK: `IDEMPOTENCY#${eventId}`,
+          processedAt: new Date().toISOString(),
+          ttl,
+        }),
+        ConditionExpression: "attribute_not_exists(PK)",
+      }),
+    );
+    return true;
+  } catch (error) {
+    if (error.name === "ConditionalCheckFailedException") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Release a previously claimed event id so a retry can reprocess it. Best effort.
+ */
+async function releaseEventClaim(eventId) {
+  if (!eventId) return;
+  try {
+    await dynamodb.send(
+      new DeleteItemCommand({
+        TableName: process.env.NOTIFICATION_TABLE_NAME,
+        Key: marshall({
+          PK: `IDEMPOTENCY#${eventId}`,
+          SK: `IDEMPOTENCY#${eventId}`,
+        }),
+      }),
+    );
+  } catch (error) {
+    logger.warn("Failed to release idempotency claim; retry may be suppressed", {
+      eventId,
+    });
+  }
 }
 
 /**
