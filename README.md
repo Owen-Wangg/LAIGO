@@ -95,7 +95,7 @@ Please refer to the [Web App User Guide](./docs/userGuide.md) for instructions o
 
 - `/cdk`: AWS CDK infrastructure code (TypeScript)
   - `/bin`: CDK app entry point and stack orchestration
-  - `/lambda`: Lambda function source code (Node.js 22.x and Python 3.11/3.12)
+  - `/lambda`: Lambda function source code (Node.js 24.x and Python 3.11/3.12)
   - `/layers`: Lambda layers for shared dependencies (postgres, psycopg3, aws-jwt-verify)
   - `/lib`: CDK stack definitions for all infrastructure (VPC, database, API, auth, hosting, WAF)
 - `/frontend`: React 19 frontend application (TypeScript, Vite, MUI, Tailwind CSS)

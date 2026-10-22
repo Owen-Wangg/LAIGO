@@ -480,7 +480,7 @@ db.secretPathUser.grantRead(adminAuthorizerRole);  // DB credentials for user lo
 
 // Authorizer Lambda with VPC access and PostgreSQL + JWT layers
 const adminAuthorizerFunction = new lambda.Function(this, `${id}-AdminAuthorizerFunction`, {
-  runtime: lambda.Runtime.NODEJS_22_X,
+  runtime: lambda.Runtime.NODEJS_24_X,
   code: lambda.Code.fromAsset("lambda/authorization"),
   handler: "adminAuthorizerFunction.handler",
   timeout: Duration.seconds(10),

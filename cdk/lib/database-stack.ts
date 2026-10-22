@@ -143,7 +143,10 @@ export class DatabaseStack extends Stack {
       ),
       multiAz: false, // Single AZ deployment for cost savings
       allocatedStorage: 100, // Initial storage in GB
-      maxAllocatedStorage: 150, // Maximum auto-scaling storage limit
+      // Generous autoscaling headroom (finding M7): raised from 150 GB so growth
+      // cannot hit the ceiling and cause a storage-full incident. 5x the initial
+      // allocation.
+      maxAllocatedStorage: 500, // Maximum auto-scaling storage limit
       allowMajorVersionUpgrade: false, // Prevent automatic major version upgrades
       autoMinorVersionUpgrade: true, // Allow automatic minor version upgrades
       backupRetention: Duration.days(7), // Retain backups for 7 days

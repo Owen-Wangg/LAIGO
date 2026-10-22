@@ -3,6 +3,8 @@ import * as cdk from "aws-cdk-lib";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as destinations from "aws-cdk-lib/aws-lambda-destinations";
+import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import { Construct } from "constructs";
@@ -169,14 +171,14 @@ export class ApiGatewayStack extends cdk.Stack {
     // Create Lambda layer for JWT verification (Node.js)
     const jwt = new lambda.LayerVersion(this, "aws-jwt-verify", {
       code: lambda.Code.fromAsset("./layers/aws-jwt-verify.zip"),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
+      compatibleRuntimes: [lambda.Runtime.NODEJS_24_X],
       description: "Contains the aws-jwt-verify library for JS",
     });
 
     // Create Lambda layer for PostgreSQL client (Node.js)
     const postgres = new lambda.LayerVersion(this, "postgres", {
       code: lambda.Code.fromAsset("./layers/postgres.zip"),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
+      compatibleRuntimes: [lambda.Runtime.NODEJS_24_X],
       description: "Contains the postgres library for JS",
     });
 
@@ -850,7 +852,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-admin-authorization-api-gateway`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/authorization"),
         handler: "adminAuthorizerFunction.handler",
         timeout: Duration.seconds(10),
@@ -894,7 +896,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-student-authorization-api-gateway`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/authorization"),
         handler: "studentAuthorizerFunction.handler",
         timeout: Duration.seconds(10),
@@ -937,7 +939,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-instructor-authorization-api-gateway`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/authorization"),
         handler: "instructorAuthorizerFunction.handler",
         timeout: Duration.seconds(10),
@@ -1008,7 +1010,13 @@ export class ApiGatewayStack extends cdk.Stack {
           "logs:CreateLogStream",
           "logs:PutLogEvents",
         ],
-        resources: ["arn:aws:logs:*:*:*"],
+        // Scope to the two Cognito-trigger functions' own log groups.
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-preSignupLambda`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-preSignupLambda:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-addStudentOnSignUp`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${id}-addStudentOnSignUp:*`,
+        ],
       }),
     );
 
@@ -1058,7 +1066,7 @@ export class ApiGatewayStack extends cdk.Stack {
     // Cognito Pre-Signup Lambda Trigger
     // Validates email domains and prevents unauthorized registrations
     const preSignupLambda = new lambda.Function(this, "PreSignupLambda", {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       handler: "preSignup.handler",
       code: lambda.Code.fromAsset("lambda/authorization"),
       timeout: Duration.seconds(10),
@@ -1079,7 +1087,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       "PostConfirmationLambda",
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         handler: "addStudentOnSignUp.handler",
         code: lambda.Code.fromAsset("lambda/authorization"),
         timeout: Duration.seconds(29),
@@ -1447,6 +1455,7 @@ export class ApiGatewayStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: "ttl",
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
@@ -1477,6 +1486,9 @@ export class ApiGatewayStack extends cdk.Stack {
         },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         encryption: dynamodb.TableEncryption.AWS_MANAGED,
+        // PITR: the whitelist drives signup access control, so loss/corruption
+        // has a security and availability impact (finding M4).
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       },
     );
@@ -1488,8 +1500,10 @@ export class ApiGatewayStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
       lifecycleRules: [{ expiration: cdk.Duration.days(90), id: "expire-old-logs" }],
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      // Gate on environment like the other stateful buckets (finding L5) so
+      // audit logs are not destroyed on stack delete in production.
+      removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: !isProd,
     });
 
     // S3 bucket for whitelist CSV uploads (avoids WAF body-size restrictions)
@@ -1551,7 +1565,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-studentFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         handler: "studentFunction.handler",
         code: lambda.Code.fromAsset("lambda/handlers"),
         timeout: Duration.seconds(29),
@@ -1611,7 +1625,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-adminFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/handlers"),
         handler: "adminFunction.handler",
         timeout: Duration.seconds(29),
@@ -1726,7 +1740,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-instructorFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/handlers"),
         handler: "instructorFunction.handler",
         timeout: Duration.seconds(29),
@@ -2146,14 +2160,13 @@ export class ApiGatewayStack extends cdk.Stack {
     playgroundTable.grantReadData(assessProgressFunction);
     assessProgressFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // Grant guardrail permissions to assessProgressFunction
-    assessProgressFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["bedrock:InvokeGuardrail", "bedrock:ApplyGuardrail"],
-        resources: [textGenGuardrail.attrGuardrailArn],
-      }),
-    );
+    // NOTE: No guardrail grant for assessProgressFunction (finding M5). It has
+    // no GUARDRAIL_ID/VERSION and never calls apply_guardrail — it only assesses
+    // conversation content already validated by the text_generation input
+    // guardrail at ingestion. Re-applying the PII-blocking guardrail here would
+    // falsely block legitimate legal content (e.g. party names in prior AI
+    // output, which is not output-guardrailed by design — see H1), so the unused
+    // bedrock:*Guardrail grant is removed to keep least privilege.
 
     assessProgressFunction.addToRolePolicy(
       new iam.PolicyStatement({
@@ -2420,14 +2433,11 @@ export class ApiGatewayStack extends cdk.Stack {
     // Grant access to Bedrock (using shared policy with specific model ARNs)
     summaryGenerationFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // Grant guardrail permissions to summaryGenerationFunction
-    summaryGenerationFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["bedrock:InvokeGuardrail", "bedrock:ApplyGuardrail"],
-        resources: [textGenGuardrail.attrGuardrailArn],
-      }),
-    );
+    // NOTE: No guardrail grant for summaryGenerationFunction (finding M5). Same
+    // rationale as assessProgressFunction above — it summarizes already-validated
+    // conversation content, has no GUARDRAIL_ID/VERSION, and never calls
+    // apply_guardrail. The unused bedrock:*Guardrail grant is removed (least
+    // privilege); re-applying PII blocking here would falsely block legal names.
 
     // Grant EventBridge permissions for notification publishing
     summaryGenerationFunction.addToRolePolicy(
@@ -2452,13 +2462,21 @@ export class ApiGatewayStack extends cdk.Stack {
     // WebSocket API for Chat Streaming
     // ========================================
 
+    // Max WebSocket session lifetime (finding M3). The API Gateway authorizer
+    // runs only at $connect, so a connection's authorization (roles) would
+    // otherwise persist for the socket's whole life. Capping the lifetime forces
+    // periodic reconnects, which re-run the authorizer and pick up revoked
+    // roles. Lowered from the previous 2h. The $connect TTL (DynamoDB cleanup)
+    // and the $default enforcement window are kept in sync from this value.
+    const wsSessionTtlSeconds = 30 * 60; // 30 minutes
+
     // Lambda for $connect route - stores connection mapping
     // No longer needs database access - receives userId from authorizer context
     const wsConnectFunction = new lambda.Function(
       this,
       `${id}-WsConnectFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/websocket"),
         handler: "connect.handler",
         timeout: Duration.seconds(10),
@@ -2469,6 +2487,7 @@ export class ApiGatewayStack extends cdk.Stack {
         environment: {
           CONNECTION_TABLE_NAME: connectionTable.tableName,
           MAX_CONNECTIONS_PER_USER: "5",
+          CONNECTION_TTL_SECONDS: wsSessionTtlSeconds.toString(),
         },
       },
     );
@@ -2478,7 +2497,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-WsAuthorizerFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/authorization"),
         handler: "wsAuthorizer.handler",
         timeout: Duration.seconds(10),
@@ -2506,7 +2525,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-WsDisconnectFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/websocket"),
         handler: "disconnect.handler",
         timeout: Duration.seconds(10),
@@ -2525,7 +2544,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-WsDefaultFunction`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/websocket"),
         handler: "default.handler",
         timeout: Duration.seconds(10),
@@ -2540,6 +2559,7 @@ export class ApiGatewayStack extends cdk.Stack {
           AUDIO_TO_TEXT_FUNCTION_NAME: audioToTextFunction.functionName,
           PLAYGROUND_GEN_FUNCTION_NAME:
             playgroundGenLambdaDockerFunc.functionName,
+          WS_MAX_SESSION_SECONDS: wsSessionTtlSeconds.toString(),
         },
       },
     );
@@ -2626,6 +2646,9 @@ export class ApiGatewayStack extends cdk.Stack {
         actions: ["execute-api:ManageConnections"],
         resources: [
           `arn:aws:execute-api:${this.region}:${this.account}:${this.wsApi.apiId}/${this.wsStage.stageName}/POST/@connections/*`,
+          // DELETE is used to force-close sessions past their max lifetime so
+          // the client reconnects and the authorizer re-runs (finding M3).
+          `arn:aws:execute-api:${this.region}:${this.account}:${this.wsApi.apiId}/${this.wsStage.stageName}/DELETE/@connections/*`,
         ],
       }),
     );
@@ -2707,7 +2730,7 @@ export class ApiGatewayStack extends cdk.Stack {
       this,
       `${id}-NotificationService`,
       {
-        runtime: lambda.Runtime.NODEJS_22_X,
+        runtime: lambda.Runtime.NODEJS_24_X,
         code: lambda.Code.fromAsset("lambda/notificationService"),
         handler: "index.handler",
         timeout: Duration.seconds(29),
@@ -2775,6 +2798,64 @@ export class ApiGatewayStack extends cdk.Stack {
       }),
     );
 
+    // ========================================
+    // Dead-letter queues for async / event-driven paths (finding H5)
+    // ========================================
+    // Helper: encrypted, SSL-enforced SQS DLQ with a depth alarm so failed
+    // async invocations and dropped events are captured and replayable instead
+    // of being silently lost.
+    // DLQ depth alarms are collected here and wired to the security alerts SNS
+    // topic once it is created (in the Security Monitoring section below), so
+    // they notify on the same channel as the other security alarms.
+    const dlqDepthAlarms: cloudwatch.Alarm[] = [];
+    const makeDeadLetterQueue = (name: string): sqs.Queue => {
+      const dlq = new sqs.Queue(this, `${id}-${name}`, {
+        queueName: `${id}-${name}`,
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
+        retentionPeriod: Duration.days(14),
+        removalPolicy: isProd
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+      });
+      const depthAlarm = new cloudwatch.Alarm(this, `${id}-${name}-DepthAlarm`, {
+        alarmName: `${id}-${name}-DepthAlarm`,
+        alarmDescription: `Messages present in ${id}-${name} dead-letter queue`,
+        metric: dlq.metricApproximateNumberOfMessagesVisible({
+          period: Duration.minutes(5),
+          statistic: "Maximum",
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      dlqDepthAlarms.push(depthAlarm);
+      return dlq;
+    };
+
+    // DLQ for the generation Lambdas invoked asynchronously (InvocationType:
+    // "Event") by the WebSocket default handler. After retries, failed events
+    // land here via the onFailure destination.
+    const asyncInvokeDlq = makeDeadLetterQueue("AsyncInvokeDLQ");
+    for (const fn of [
+      textGenLambdaDockerFunc,
+      playgroundGenLambdaDockerFunc,
+      assessProgressFunction,
+      audioToTextFunction,
+      summaryGenerationFunction,
+    ]) {
+      fn.configureAsyncInvoke({
+        onFailure: new destinations.SqsDestination(asyncInvokeDlq),
+        retryAttempts: 2,
+      });
+    }
+
+    // DLQ for the EventBridge notification target so undeliverable notification
+    // events are retained rather than dropped.
+    const notificationDlq = makeDeadLetterQueue("NotificationDLQ");
+
     // Create EventBridge rule for notification events
     new events.Rule(this, `${id}-NotificationRule`, {
       eventBus: notificationEventBus,
@@ -2787,7 +2868,12 @@ export class ApiGatewayStack extends cdk.Stack {
           "Case Submitted",
         ],
       },
-      targets: [new targets.LambdaFunction(notificationServiceFunction)],
+      targets: [
+        new targets.LambdaFunction(notificationServiceFunction, {
+          deadLetterQueue: notificationDlq,
+          retryAttempts: 2,
+        }),
+      ],
     });
 
     // Grant API Gateway permission to invoke the notification service
@@ -2881,9 +2967,17 @@ export class ApiGatewayStack extends cdk.Stack {
           },
           physicalResourceId: cr.PhysicalResourceId.of("BedrockLoggingConfig"),
         },
-        policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-          resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
-        }),
+        // Grant only the single SDK action this custom resource calls instead
+        // of the auto-derived ANY_RESOURCE wildcard. putModelInvocationLogging-
+        // Configuration is an account-level Bedrock setting that does not
+        // support resource-level ARNs, so "*" is required for the resource.
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            effect: iam.Effect.ALLOW,
+            actions: ["bedrock:PutModelInvocationLoggingConfiguration"],
+            resources: ["*"],
+          }),
+        ]),
       },
     );
     enableBedrockLogging.node.addDependency(
@@ -2927,6 +3021,11 @@ export class ApiGatewayStack extends cdk.Stack {
     }
 
     const snsAlarmAction = new cloudwatchActions.SnsAction(securityAlertsTopic);
+
+    // Wire the DLQ depth alarms (created earlier) to the security alerts topic.
+    for (const dlqAlarm of dlqDepthAlarms) {
+      dlqAlarm.addAlarmAction(snsAlarmAction);
+    }
 
     // Allow the admin function to publish notifications about admin role
     // changes to the security alerts topic, scoped to this topic only.

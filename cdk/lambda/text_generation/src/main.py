@@ -13,6 +13,30 @@ from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 logger = Logger(service="TextGeneration")
 metrics = Metrics(namespace="LAIGO", service="TextGeneration")
 
+
+def summarize_guardrail_assessment(guard_response):
+    """Return a redacted summary of a guardrail response for logging.
+
+    The raw guardrail response echoes the flagged input (privileged PII / case
+    content), so it must never be logged verbatim. This extracts only the
+    non-sensitive signal: the top-level action and which policy types fired.
+    """
+    policy_types = set()
+    for assessment in (guard_response or {}).get("assessments", []):
+        for policy_key in (
+            "topicPolicy",
+            "contentPolicy",
+            "sensitiveInformationPolicy",
+            "wordPolicy",
+            "contextualGroundingPolicy",
+        ):
+            if policy_key in assessment:
+                policy_types.add(policy_key)
+    return {
+        "action": (guard_response or {}).get("action"),
+        "triggeredPolicies": sorted(policy_types),
+    }
+
 # Environment variables
 DB_SECRET_NAME = os.environ["SM_DB_CREDENTIALS"]
 REGION = os.environ["REGION"]
@@ -278,11 +302,14 @@ def get_audio_details(case_id):
             WHERE case_id = %s;
         """, (case_id,))        
         result = cur.fetchone()
-        logger.info(f"Query result: {result}")        
         cur.close()
         if result:
             audio_description = result[0]
-            logger.info(f"Audio description found for case_id {case_id}: {audio_description}")
+            # Log identifiers/lengths only — never raw case content (privileged PII).
+            logger.info(
+                f"Audio description found for case_id {case_id} "
+                f"(length={len(audio_description) if audio_description else 0})"
+            )
             return audio_description
         else:
             logger.error(f"No audio description found for case_id {case_id}")
@@ -364,12 +391,15 @@ def handler(event, context):
     if not case_id:
         return create_response(400, "Missing required parameters: case_id", event)
 
-    # Unified Identity Extraction
-    # Prefer explicit payload userId (used by websocket invocations),
-    # then fall back to HTTP API authorizer context.
-    user_id = event.get("userId")
+    # Unified Identity Extraction (finding L4)
+    # Prefer the HTTP API authorizer context as the trusted identity source.
+    # Only fall back to the payload userId for WebSocket invocations, where the
+    # async Lambda event carries no authorizer context and default.js sets userId
+    # server-side from its own authorizer (never from client input). This way a
+    # client-supplied userId can never override the authorizer on the HTTP path.
+    user_id = request_context.get("authorizer", {}).get("userId")
     if not user_id:
-        user_id = request_context.get("authorizer", {}).get("userId")
+        user_id = event.get("userId")
 
     # Unified Authorization Check — must run before any case content is loaded,
     # logged, or sent to Bedrock so callers cannot probe cases they do not own.
@@ -505,7 +535,10 @@ def handler(event, context):
                 content=[{"text": {"text": student_query, "qualifiers": ["guard_content"]}}]
             )
             if guard_response.get("action") == "GUARDRAIL_INTERVENED":
-                logger.info(f"Guardrail blocked initial case context: {json.dumps(guard_response)}")
+                logger.info(
+                    "Guardrail blocked initial case context",
+                    guardrail=summarize_guardrail_assessment(guard_response),
+                )
                 error_message = "Sorry, I cannot process this case because it appears to contain content that violates our content policy. Please review the case details and try again."
                 for assessment in guard_response.get('assessments', []):
                     if 'sensitiveInformationPolicy' in assessment:
@@ -564,8 +597,12 @@ def handler(event, context):
             content=[{"text": {"text": question, "qualifiers": ["guard_content"]}}]
         )
         if guard_response.get("action") == "GUARDRAIL_INTERVENED":
-            # Add debug logging to see the full guardrail response
-            logger.info(f"Guardrail response: {json.dumps(guard_response)}")
+            # Log only the redacted assessment summary — the raw response echoes
+            # the flagged user input (potential PII), so it must not be logged.
+            logger.info(
+                "Guardrail intervened on user query",
+                guardrail=summarize_guardrail_assessment(guard_response),
+            )
             
             # Check if it's a PII issue or prompt attack
             error_message = "Sorry, I cannot process your request."
