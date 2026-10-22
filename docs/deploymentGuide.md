@@ -43,7 +43,7 @@ You also need AWS credentials configured (`aws configure` or SSO profile), and p
 
 ### Custom Domain (Optional)
 
-The `DomainName` context parameter lets you serve the frontend on your own domain and lock down CORS to that origin. If you want to lock CORS without registering a custom domain (for example, to stay on the default Amplify URL), use `FrontendOrigin` instead, which sets the CORS origin only. A `prod` deployment requires one of `DomainName` or `FrontendOrigin`; in `dev`/`test` without either, the app runs on the default Amplify domain and CORS allows all origins (`*`).
+The `DomainName` context parameter lets you serve the frontend on your own domain and lock down CORS to that origin. If you want to lock CORS without registering a custom domain (for example, to stay on the default Amplify URL), use `FrontendOrigin` instead, which sets the CORS origin only. A `prod` deployment requires one of `DomainName` or `FrontendOrigin`; in `dev`/`test` without either, CORS only allows `http://localhost:5173`, so the deployed frontend can't reach the API.
 
 **When you should use this:**
 
@@ -432,7 +432,9 @@ A `prod` deployment must lock CORS to a known frontend origin, so you must pass 
 
 **Option A: No custom domain, no SES (simplest)**
 
-Uses the default Amplify domain, wildcard CORS, and Cognito's built-in email service. Good for development, testing, or small deployments.
+Uses the default Amplify domain and Cognito's built-in email service. This is a two-step deploy, because the Amplify URL isn't known until the first deploy creates it.
+
+**Step 1:** Deploy to create the Amplify app. Sign-in won't work until Step 2.
 
 ```bash
 npx cdk deploy --all \
@@ -443,7 +445,7 @@ npx cdk deploy --all \
     --profile <YOUR-PROFILE-NAME>
 ```
 
-To harden a deployment that stays on the default Amplify domain, deploy with `Environment=prod` and pass the Amplify URL as `FrontendOrigin` (no custom domain is registered):
+**Step 2:** Copy the app URL from the deploy output (or the Amplify console) and redeploy with `Environment=prod` and that URL as `FrontendOrigin`:
 
 ```bash
 npx cdk deploy --all \
@@ -455,14 +457,7 @@ npx cdk deploy --all \
     --profile <YOUR-PROFILE-NAME>
 ```
 
-> **First-time `prod` on the default Amplify domain (two-phase bootstrap)**
->
-> The Amplify app and its URL (`https://main.<appId>.amplifyapp.com`) don't exist until the first deploy creates them, and `<appId>` is assigned by Amplify at creation time — so you can't know `FrontendOrigin` up front. A `prod` deploy also requires an origin, so the very first deploy can't be `prod` on the default domain. Bootstrap it in two steps:
->
-> 1. Deploy once with `Environment=dev` (Option A). This creates the Amplify app; CORS is `*` for now.
-> 2. Copy the app URL from the deploy output (or the Amplify console), then redeploy with `Environment=prod` and `FrontendOrigin="https://main.<appId>.amplifyapp.com"` (the command above).
->
-> The `appId` is stable across redeploys, so this is a one-time step. If you have a custom domain, skip all of this and deploy `prod` with `DomainName` from the start (Option B) — you already know that value.
+> The `appId` is stable across redeploys, so this is a one-time step. With a custom domain, skip this and deploy `prod` with `DomainName` from the start (Option B).
 
 **Option B: Custom domain only (no SES)**
 
