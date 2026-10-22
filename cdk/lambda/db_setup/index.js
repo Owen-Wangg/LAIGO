@@ -213,9 +213,9 @@ async function createAppUsers(
 
   await adminClient.query("BEGIN");
   try {
-    await adminClient.query(sql);
-
+    // Users must exist before `sql` grants the group roles to them.
     await adminClient.query(createOrUpdateUserSql);
+    await adminClient.query(sql);
     await adminClient.query("COMMIT");
   } catch (e) {
     await adminClient.query("ROLLBACK");

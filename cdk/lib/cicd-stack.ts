@@ -157,9 +157,14 @@ export class CICDStack extends cdk.Stack {
       // Grant the shared CodeBuild role scoped push/pull on THIS repo only
       // (grantPullPush also grants ecr:GetAuthorizationToken on *, which is an
       // account-level action). DescribeImages is needed by the buildspec's
-      // `aws ecr describe-images` change-detection check.
+      // `aws ecr describe-images` change-detection check, and
+      // DescribeImageScanFindings by the vulnerability-scan gate.
       ecrRepo.grantPullPush(codeBuildRole);
-      ecrRepo.grant(codeBuildRole, "ecr:DescribeImages");
+      ecrRepo.grant(
+        codeBuildRole,
+        "ecr:DescribeImages",
+        "ecr:DescribeImageScanFindings",
+      );
 
       // Store repository reference and add resource-specific tags
       this.ecrRepositories[lambda.name] = ecrRepo;

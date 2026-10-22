@@ -43,7 +43,7 @@ You also need AWS credentials configured (`aws configure` or SSO profile), and p
 
 ### Custom Domain (Optional)
 
-The `DomainName` context parameter lets you serve the frontend on your own domain and lock down CORS to that origin. If you want to lock CORS without registering a custom domain (for example, to stay on the default Amplify URL), use `FrontendOrigin` instead, which sets the CORS origin only. A `prod` deployment requires one of `DomainName` or `FrontendOrigin`; in `dev`/`test` without either, the app runs on the default Amplify domain and CORS allows all origins (`*`).
+The `DomainName` context parameter lets you serve the frontend on your own domain and lock down CORS to that origin. If you want to lock CORS without registering a custom domain (for example, to stay on the default Amplify URL), use `FrontendOrigin` instead, which sets the CORS origin only. A `prod` deployment requires one of `DomainName` or `FrontendOrigin`; in `dev`/`test` without either, CORS only allows `http://localhost:5173`, so the deployed frontend can't reach the API.
 
 **When you should use this:**
 
@@ -101,7 +101,12 @@ This deployment creates:
 - an Amplify app connected to GitHub, and
 - a CodePipeline source stage connected to GitHub.
 
-You must create a GitHub personal access token (classic) with the `repo` scope. Follow GitHub instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic).
+You must create a GitHub personal access token using one of the following options. Follow GitHub instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+
+- **Personal access token (classic):** grant the `repo` scope.
+- **Fine-grained token:** grant the target repository the following permissions:
+  - **Metadata:** Read-only (mandatory)
+  - **Webhooks:** Read and write
 
 **Save the token value securely. You will upload it to AWS Secrets Manager in Step 2.**
 
@@ -122,11 +127,11 @@ If either model is not enabled in the deployment region, model invocation calls 
 
 ### Step 1: Fork & Clone The Repository
 
-First, fork the repository from the [main branch](https://github.com/UBC-CIC/Legal-Aid-Tool), then clone your fork:
+First, fork the repository from the [main branch](https://github.com/UBC-CIC/LAIGO), then clone your fork:
 
 ```bash
-git clone https://github.com/<YOUR-GITHUB-USERNAME>/Legal-Aid-Tool.git
-cd Legal-Aid-Tool
+git clone https://github.com/<YOUR-GITHUB-USERNAME>/LAIGO.git
+cd LAIGO
 ```
 
 #### Install Dependencies
@@ -156,7 +161,7 @@ Create a secret named `github-personal-access-token` with JSON key `my-github-to
 
 Before running the command, replace:
 
-- `<YOUR-GITHUB-TOKEN>` with your actual GitHub Personal Access Token (classic) value.
+- `<YOUR-GITHUB-TOKEN>` with your actual GitHub Personal Access Token value (classic or fine-grained).
 - `<YOUR-PROFILE-NAME>` with your AWS CLI profile name.
 
 <details>
@@ -384,7 +389,7 @@ Replace:
 Run synth:
 
 ```bash
-cdk synth --all --context StackPrefix="<YOUR-STACK-PREFIX>" --context GithubRepo="LAIGO" --profile <YOUR-PROFILE-NAME>
+npx cdk synth --all --context StackPrefix="<YOUR-STACK-PREFIX>" --context GithubRepo="LAIGO" --profile <YOUR-PROFILE-NAME>
 ```
 
 Bootstrap your primary region:
@@ -401,7 +406,7 @@ npx cdk bootstrap aws://<YOUR_AWS_ACCOUNT_ID>/us-east-1 --context StackPrefix="<
 
 #### 3.3 Choose your deployment options
 
-LAIGO supports two optional context parameters that can be combined independently. Read the descriptions below and pick the deploy command that matches your needs.
+LAIGO supports several optional context parameters. `DomainName` and `FrontendOrigin` cover the frontend origin (a `prod` deployment needs one of them), while `SesVerifiedDomain` is independent of them. Read the descriptions below and pick the deploy command that matches your needs.
 
 | Parameter | Purpose | When to use |
 |---|---|---|
@@ -427,7 +432,9 @@ A `prod` deployment must lock CORS to a known frontend origin, so you must pass 
 
 **Option A: No custom domain, no SES (simplest)**
 
-Uses the default Amplify domain, wildcard CORS, and Cognito's built-in email service. Good for development, testing, or small deployments.
+Uses the default Amplify domain and Cognito's built-in email service. This is a two-step deploy, because the Amplify URL isn't known until the first deploy creates it.
+
+**Step 1:** Deploy to create the Amplify app. Sign-in won't work until Step 2.
 
 ```bash
 npx cdk deploy --all \
@@ -438,7 +445,7 @@ npx cdk deploy --all \
     --profile <YOUR-PROFILE-NAME>
 ```
 
-To harden a deployment that stays on the default Amplify domain, deploy with `Environment=prod` and pass the Amplify URL as `FrontendOrigin` (no custom domain is registered):
+**Step 2:** Copy the app URL from the deploy output (or the Amplify console) and redeploy with `Environment=prod` and that URL as `FrontendOrigin`:
 
 ```bash
 npx cdk deploy --all \
@@ -450,14 +457,7 @@ npx cdk deploy --all \
     --profile <YOUR-PROFILE-NAME>
 ```
 
-> **First-time `prod` on the default Amplify domain (two-phase bootstrap)**
->
-> The Amplify app and its URL (`https://main.<appId>.amplifyapp.com`) don't exist until the first deploy creates them, and `<appId>` is assigned by Amplify at creation time — so you can't know `FrontendOrigin` up front. A `prod` deploy also requires an origin, so the very first deploy can't be `prod` on the default domain. Bootstrap it in two steps:
->
-> 1. Deploy once with `Environment=dev` (Option A). This creates the Amplify app; CORS is `*` for now.
-> 2. Copy the app URL from the deploy output (or the Amplify console), then redeploy with `Environment=prod` and `FrontendOrigin="https://main.<appId>.amplifyapp.com"` (the command above).
->
-> The `appId` is stable across redeploys, so this is a one-time step. If you have a custom domain, skip all of this and deploy `prod` with `DomainName` from the start (Option B) — you already know that value.
+> The `appId` is stable across redeploys, so this is a one-time step. With a custom domain, skip this and deploy `prod` with `DomainName` from the start (Option B).
 
 **Option B: Custom domain only (no SES)**
 
@@ -532,7 +532,7 @@ If you deployed with `--context SesVerifiedDomain=...`, Cognito email verificati
 ### Step 3: Build AWS Amplify App
 
 1. Log in to AWS console, and navigate to AWS Amplify. You can do so by typing Amplify in the search bar at the top.
-2. From All apps, click `<stack-prefix>-Amplify-admin`.
+2. From All apps, click `<stack-prefix>-AmplifyStack-amplify`.
 3. Then click `main` under branches.
 4. Click **Run job** and wait for the build to complete.
 5. You now have access to the Amplify App ID and the public domain name to use the web app.
