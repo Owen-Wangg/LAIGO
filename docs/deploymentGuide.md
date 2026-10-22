@@ -101,7 +101,12 @@ This deployment creates:
 - an Amplify app connected to GitHub, and
 - a CodePipeline source stage connected to GitHub.
 
-You must create a GitHub personal access token (classic) with the `repo` scope. Follow GitHub instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic).
+You must create a GitHub personal access token using one of the following options. Follow GitHub instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+
+- **Personal access token (classic):** grant the `repo` scope.
+- **Fine-grained token:** grant the target repository the following permissions:
+  - **Metadata:** Read-only (mandatory)
+  - **Webhooks:** Read and write
 
 **Save the token value securely. You will upload it to AWS Secrets Manager in Step 2.**
 
@@ -156,7 +161,7 @@ Create a secret named `github-personal-access-token` with JSON key `my-github-to
 
 Before running the command, replace:
 
-- `<YOUR-GITHUB-TOKEN>` with your actual GitHub Personal Access Token (classic) value.
+- `<YOUR-GITHUB-TOKEN>` with your actual GitHub Personal Access Token value (classic or fine-grained).
 - `<YOUR-PROFILE-NAME>` with your AWS CLI profile name.
 
 <details>
