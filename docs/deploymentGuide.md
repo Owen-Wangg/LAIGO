@@ -122,11 +122,11 @@ If either model is not enabled in the deployment region, model invocation calls 
 
 ### Step 1: Fork & Clone The Repository
 
-First, fork the repository from the [main branch](https://github.com/UBC-CIC/Legal-Aid-Tool), then clone your fork:
+First, fork the repository from the [main branch](https://github.com/UBC-CIC/LAIGO), then clone your fork:
 
 ```bash
-git clone https://github.com/<YOUR-GITHUB-USERNAME>/Legal-Aid-Tool.git
-cd Legal-Aid-Tool
+git clone https://github.com/<YOUR-GITHUB-USERNAME>/LAIGO.git
+cd LAIGO
 ```
 
 #### Install Dependencies
@@ -384,7 +384,7 @@ Replace:
 Run synth:
 
 ```bash
-cdk synth --all --context StackPrefix="<YOUR-STACK-PREFIX>" --context GithubRepo="LAIGO" --profile <YOUR-PROFILE-NAME>
+npx cdk synth --all --context StackPrefix="<YOUR-STACK-PREFIX>" --context GithubRepo="LAIGO" --profile <YOUR-PROFILE-NAME>
 ```
 
 Bootstrap your primary region:
@@ -401,7 +401,7 @@ npx cdk bootstrap aws://<YOUR_AWS_ACCOUNT_ID>/us-east-1 --context StackPrefix="<
 
 #### 3.3 Choose your deployment options
 
-LAIGO supports two optional context parameters that can be combined independently. Read the descriptions below and pick the deploy command that matches your needs.
+LAIGO supports several optional context parameters. `DomainName` and `FrontendOrigin` cover the frontend origin (a `prod` deployment needs one of them), while `SesVerifiedDomain` is independent of them. Read the descriptions below and pick the deploy command that matches your needs.
 
 | Parameter | Purpose | When to use |
 |---|---|---|
@@ -532,7 +532,7 @@ If you deployed with `--context SesVerifiedDomain=...`, Cognito email verificati
 ### Step 3: Build AWS Amplify App
 
 1. Log in to AWS console, and navigate to AWS Amplify. You can do so by typing Amplify in the search bar at the top.
-2. From All apps, click `<stack-prefix>-Amplify-admin`.
+2. From All apps, click `<stack-prefix>-AmplifyStack-amplify`.
 3. Then click `main` under branches.
 4. Click **Run job** and wait for the build to complete.
 5. You now have access to the Amplify App ID and the public domain name to use the web app.
