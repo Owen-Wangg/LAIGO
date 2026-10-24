@@ -20,6 +20,7 @@
     - [Step 2: Request SES Production Access (if using SesVerifiedDomain)](#step-2-request-ses-production-access-if-using-sesverifieddomain)
     - [Step 3: Build AWS Amplify App](#step-3-build-aws-amplify-app)
     - [Step 4: Visit Web App](#step-4-visit-web-app)
+    - [Step 5: Create the First Admin (`prod` deployments)](#step-5-create-the-first-admin-prod-deployments)
   - [Cleanup](#cleanup)
     - [Taking down the deployed stack](#taking-down-the-deployed-stack)
   - [Troubleshooting](#troubleshooting)
@@ -540,6 +541,26 @@ If you deployed with `--context SesVerifiedDomain=...`, Cognito email verificati
 ### Step 4: Visit Web App
 
 You can now navigate to the web app URL to see your application in action.
+
+### Step 5: Create the First Admin (`prod` deployments)
+
+The first user to sign up is automatically assigned the `admin` role. However, `prod` deployments start with signup mode set to `whitelist`, and the whitelist is empty, so the first user is rejected with "Signup is not available for this email address." (`dev` and `test` deployments start in `public` mode and can skip this step.)
+
+1. Temporarily switch signup to public:
+
+   ```bash
+   aws ssm put-parameter \
+       --name "/LAIGO/SignupMode" \
+       --value public \
+       --type String \
+       --overwrite \
+       --profile <YOUR-PROFILE-NAME>
+   ```
+
+2. Immediately sign up in the web app with your admin email. Its domain must be in `/LAIGO/AllowedEmailDomains`.
+3. Log in as the admin, open the **Signup Access** tab, and switch back to whitelist mode. Upload a CSV (`email,role`) for the remaining users.
+
+> **Note:** While signup is public, anyone with an allowed email domain can sign up, and the first one becomes admin. Complete steps 2 and 3 right away.
 
 ## Cleanup
 
