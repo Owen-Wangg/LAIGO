@@ -145,12 +145,20 @@ describe("ApiGatewayStack Bedrock model options array", () => {
     expect(opts[1].constraints.topPRange).toEqual([0, 1.0]);
   });
 
-  test("BedrockLLMParameter default remains as Llama 3 (not Sonnet 5.5)", () => {
+  test("BedrockLLMParameter default is Sonnet 5.5 inference profile (matches first model option)", () => {
     const props = findSsmParameter(
       template,
       "/TestApiStack/LAIGO/BedrockLLMId",
     );
     expect(props?.Value).toBeDefined();
-    expect(String(props!.Value)).toBe("meta.llama3-70b-instruct-v1:0");
+    expect(String(props!.Value)).toContain(
+      "inference-profile/us.anthropic.claude-sonnet-5-5",
+    );
+    const optionsProps = findSsmParameter(
+      template,
+      "/TestApiStack/LAIGO/BedrockModelOptions",
+    );
+    const opts = JSON.parse(optionsProps!.Value!);
+    expect(String(props!.Value)).toBe(opts[0].value);
   });
 });
