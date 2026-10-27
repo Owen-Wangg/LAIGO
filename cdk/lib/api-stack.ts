@@ -1262,7 +1262,7 @@ export class ApiGatewayStack extends cdk.Stack {
       {
         parameterName: `/${id}/LAIGO/BedrockLLMId`,
         description: "Parameter containing the Bedrock LLM ID",
-        stringValue: "meta.llama3-70b-instruct-v1:0",
+        stringValue: `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5-5`,
       },
     );
 
