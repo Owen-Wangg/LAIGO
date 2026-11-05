@@ -7,6 +7,7 @@ const {
 } = require("./utils/utils");
 const { PERMISSION_MODELS, authorizeCaseAccess } = require("./utils/authorization");
 const { deleteChatHistory } = require("./utils/deleteChatHistory");
+const { parsePagination } = require("./utils/pagination");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "InstructorFunction" });
 
@@ -280,9 +281,7 @@ const routes = {
       }
 
       const params = event.queryStringParameters || {};
-      const page = parseInt(params.page || "0", 10);
-      const limit = parseInt(params.limit || "10", 10);
-      const offset = page * limit;
+      const { limit, offset } = parsePagination(params);
       const search = params.search ? `%${params.search}%` : null;
       const status = params.status && params.status !== "All" ? params.status.toLowerCase() : null;
 
@@ -524,12 +523,21 @@ const routes = {
         return;
       }
 
-      // Unarchive case
-      await sqlConnection`
+      // Only an archived case can be unarchived; any other state is owned
+      // by the submit/feedback workflow and must not be reset here.
+      const unarchived = await sqlConnection`
             UPDATE "cases"
-            SET status = 'in_progress'
-            WHERE case_id = ${unarchiveCaseId};
+            SET status = 'in_progress', sent_to_review = false
+            WHERE case_id = ${unarchiveCaseId} AND status = 'archived'
+            RETURNING case_id;
           `;
+      if (unarchived.length === 0) {
+        response.statusCode = 409;
+        response.body = JSON.stringify({
+          error: "Only archived cases can be unarchived.",
+        });
+        return;
+      }
 
       response.body = JSON.stringify({
         message: "Case unarchived successfully",
