@@ -26,6 +26,12 @@ The following Lambda layers have locked dependencies. Each layer is deployed as 
 
 > **Important:** When you update a layer's dependencies, you must rebuild and re-zip the layer before running `cdk deploy`. The zip file is what gets uploaded to AWS.
 
+`cdk/layers/bedrock_client/` is a first-party Python package (Bedrock client factory and prompt-input sanitizer) with no third-party dependencies. CDK deploys the folder directly as a layer (no zip), and the `text_generation` and `playground_generation` Dockerfiles copy it into their images. Changes to it are picked up by the next `cdk deploy` and, for the Docker functions, by the CI/CD pipeline.
+
+`cdk/layers/psycopg2.zip` is not referenced by any stack.
+
+Dependabot (`.github/dependabot.yml`) opens weekly update PRs for the npm projects (`frontend`, `cdk`, and the three Node.js layers) and the pip projects (`text_generation`, `playground_generation`, and the `psycopg3` layer). Minor and patch bumps are grouped into one PR per ecosystem.
+
 ## How Dependencies Were Locked
 
 ### 1. Requirements Structure
@@ -114,14 +120,18 @@ This produces `cdk/layers/psycopg3-layer.zip` compiled for the Amazon Linux 2023
 
 ### 4. Key Locked Dependencies
 
+These versions are a snapshot; the lock files are the source of truth.
+
 **Python (LLM Lambda Functions):**
 
 ```
-langchain==1.2.10
-langchain-aws==1.3.0
-langchain-community==0.4.1
-langchain-core==1.2.16
-langgraph==1.0.9
+langchain==1.4.6
+langchain-aws==1.9.0
+langchain-classic==1.0.8
+langchain-community==0.4.2
+langchain-core==1.6.12 (text_generation)
+langchain-core==1.6.10 (playground_generation)
+langgraph==1.2.16
 ```
 
 **Python (Database Connectivity):**
@@ -129,27 +139,25 @@ langgraph==1.0.9
 (`psycopg` and `psycopg-binary` are used in Lambda functions; `psycopg-pool` is locked in the `psycopg3` layer.)
 
 ```
-psycopg==3.3.3
-psycopg-binary==3.3.3
-psycopg-pool==3.3.0
+psycopg==3.3.6
+psycopg-binary==3.3.6
+psycopg-pool==3.3.3
 ```
 
 **Python (AWS Services):**
 
 ```
-boto3==1.42.56 (text_generation)
-boto3==1.42.57 (playground_generation)
-botocore==1.42.56 (text_generation)
-botocore==1.42.57 (playground_generation)
+boto3==1.43.114
+botocore==1.43.116
 ```
 
 **Node.js Layers:**
 
 ```
-aws-jwt-verify==4.0.1
-postgres==3.4.7
-node-pg-migrate==7.9.1
-pg==8.13.3
+aws-jwt-verify==5.2.1
+postgres==3.4.9
+node-pg-migrate==9.0.0
+pg==8.23.1
 ```
 
 ## How to Modify Dependencies
@@ -183,17 +191,18 @@ pg==8.13.3
 
    - For Python Dockerized Lambda functions (for example `text_generation` and `playground_generation`), commit + push is sufficient. The CI/CD pipeline rebuilds and redeploys those functions.
 
-   - For Lambda layers, after updating dependencies/lock files, keep Docker Desktop running and run:
+   - For Lambda layers, after updating dependencies/lock files, rebuild the layer zip (see [Building Layer Zip Files](#3-building-layer-zip-files); only the `psycopg3` build needs Docker) and run:
 
      ```bash
      cd cdk
      npx cdk deploy --all \
        --context StackPrefix=<YOUR-STACK-PREFIX> \
+       --context Environment=<dev|test|prod> \
        --context GithubRepo=<YOUR-GITHUB-REPO> \
        --profile <YOUR-PROFILE-NAME>
      ```
 
-     This updates the layer assets in AWS.
+     Pass the same context values you used for the original deployment (including `DomainName` or `FrontendOrigin` for `prod`). This updates the layer assets in AWS.
 
    - **Option 1: Using Git in the Terminal**
 
@@ -265,8 +274,9 @@ Once the push is complete, CodePipeline will automatically detect and redeploy a
    cd cdk
    npx cdk deploy --all \
      --context StackPrefix=<YOUR-STACK-PREFIX> \
+     --context Environment=<dev|test|prod> \
      --context GithubRepo=<YOUR-GITHUB-REPO> \
      --profile <YOUR-PROFILE-NAME>
    ```
 
-   Then commit and push the updated lock files and zip file to keep the repository in sync.
+   Use the same context values as your original deployment. Then commit and push the updated lock files and zip file to keep the repository in sync.

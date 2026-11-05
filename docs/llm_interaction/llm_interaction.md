@@ -15,9 +15,13 @@ All functions use AWS Bedrock models. Configuration is managed centrally via SSM
 | Parameter        | Purpose                                                                                                              | Configuration                                                                | Acceptable Values                                                                                            |
 |------------------|----------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
 | `bedrock_llm_id` | Identifies which Bedrock model to use for generation.                                                                | Single shared SSM parameter (`BEDROCK_LLM_PARAM`), used by all functions     | Must match a valid Bedrock model ID or cross-region inference profile ARN (e.g., `"meta.llama3-70b-instruct-v1:0"`, `"arn:aws:bedrock:{region}:{account}:inference-profile/us.anthropic.claude-sonnet-5-5"`) |
-| `temperature`     | Controls randomness of the generated output. Lower = more deterministic; higher = more creative.                    | Single shared SSM parameter (`BEDROCK_TEMP_PARAM`), used by all functions    | A float between `0` and `1`.                                                                                 |
-| `top_p`           | Nucleus sampling: percentage of most-likely candidates considered for the next token.                               | Single shared SSM parameter (`BEDROCK_TOP_P_PARAM`), used by all functions   | A float between `0` and `1`.                                                                                 |
-| `max_tokens`      | Maximum number of tokens the model is allowed to generate in its response.                                          | Single shared SSM parameter (`BEDROCK_MAX_TOKENS_PARAM`), used by all functions | Any positive integer.                                                                                     |
+| `temperature`     | Controls randomness of the generated output. Lower = more deterministic; higher = more creative.                    | Single shared SSM parameter (`BEDROCK_TEMP_PARAM`), used by all functions    | A float within the selected model's `temperatureRange` (default `[0, 1]`).                                   |
+| `top_p`           | Nucleus sampling: percentage of most-likely candidates considered for the next token.                               | Single shared SSM parameter (`BEDROCK_TOP_P_PARAM`), used by all functions   | A float within the selected model's `topPRange` (default `[0, 1]`).                                          |
+| `max_tokens`      | Maximum number of tokens the model is allowed to generate in its response.                                          | Single shared SSM parameter (`BEDROCK_MAX_TOKENS_PARAM`), used by all functions | A positive integer up to the selected model's `maxOutputTokens`.                                          |
+
+The selectable models and their limits come from the `BedrockModelOptions` SSM parameter (see the [Modification Guide](../modificationGuide.md#modifying-the-llm)).
+
+Sampling parameters depend on the model family. Meta Llama and Claude 3.x receive both `temperature` and `top_p`. Claude 4.x accepts only one of them, so the backend sends `temperature` only. Claude 5.x (including the default, Claude Sonnet 5.5) accepts neither, so the backend omits them for that family. The values are still stored and shown in the admin UI.
 
 > All Lambda functions (text generation, case generation, summary generation, assessment, playground) point to the exact same SSM parameters in CDK. Changing a value via the admin AI Configuration page updates every function at once. Each function does have a hardcoded fallback default that applies only if the SSM parameter has not been set yet:
 >
@@ -40,6 +44,9 @@ All Python Lambda functions share these common patterns:
 - **RDS Proxy** for PostgreSQL connection pooling
 - **Cached globals** for secrets, parameters, and DB connections across warm invocations
 - **AWS Lambda Powertools** for structured logging and metrics (`Logger`, `Metrics`)
+- **Disclaimer gate**: `is_disclaimer_accepted` (in `helpers/usage.py`) blocks the request before any Bedrock call if the user has not accepted the active disclaimer. It fails closed if the check cannot run.
+- **Daily message limit**: `check_and_increment_usage` counts one message per request (including case creation, summaries, assessments, and playground requests) and rejects requests over the limit with `429` (or a WebSocket error)
+- **Prompt-input sanitizing**: text generation, case generation, progress assessment, and playground generation use the shared `bedrock_client` layer (`cdk/layers/bedrock_client/`), which provides the Bedrock runtime client and sanitizes user input before it is interpolated into prompts. Summary generation creates its Bedrock client inline.
 
 ---
 
@@ -80,7 +87,7 @@ Text generation powers the interview assistant, allowing students to have multi-
 
 - `check_authorization(user_id, case_id)`:
     - Verifies the user owns the specified case (only case owner can send messages)
-    - Uses `@functools.lru_cache` for performance
+    - Not cached: the ownership query runs on every request so revoked access takes effect immediately
 
 #### Chat Helpers (`helpers/chat.py`)
 
@@ -157,7 +164,7 @@ Automatically generates a case title based on inputs like case type, jurisdictio
 - `handle_generate_title(case_id, case_type, jurisdiction, case_description, province)`:
     - Orchestrates the title generation process
     - Creates a Bedrock LLM instance with custom configuration
-    - Calls `get_response` from the chat helper to generate the title
+    - Calls `generate_case_title` from the chat helper to generate the title
     - Updates the database with the capitalized title via `update_title`
     - Returns the generated title string
 
@@ -179,8 +186,8 @@ Automatically generates a case title based on inputs like case type, jurisdictio
     - Returns a configuration dictionary for Bedrock `InvokeModel` (not `ChatBedrockConverse`)
     - Used with direct `bedrock_runtime.invoke_model()` calls
 
-- `get_response(case_type, llm, jurisdiction, case_description, province)`:
-    - Constructs a prompt instructing the LLM to generate a professional, concise case title (under 100 characters)
+- `generate_case_title(case_type, llm, jurisdiction, case_description, province)`:
+    - Sanitizes the user-provided fields, then constructs a prompt instructing the LLM to generate a professional, concise case title (under 100 characters)
     - Prompt explicitly avoids personal information and country/region names
     - Invokes the model via `bedrock_runtime.invoke_model()` and extracts the response text
     - Trims the result to 100 characters
@@ -290,7 +297,7 @@ Evaluates a student's progress within a specific interview block by analyzing th
         - **Standard mode**: Requires `case_id` and `block_type`; uses database assessment prompts and case-specific chat history
         - **Playground mode**: Uses `custom_prompt` and `session_id`; reads from the playground DynamoDB table; never unlocks blocks
     - Performs IDOR protection in standard mode
-    - Constructs session ID as `{case_id}-{block_type}` (standard) or `playground-{session_id}-{block_type}` (playground)
+    - Constructs session ID as `{case_id}-{block_type}` (standard) or `playground-{user_id}-{session_id}-{block_type}` (playground, so sessions are namespaced per caller)
 
 - `invoke_model_text(system_instructions, human_context)`:
     - Invokes the Bedrock model directly via `bedrock_runtime.invoke_model()`
@@ -329,8 +336,15 @@ The LLM receives:
 - This logic is applied consistently in both standard assessment mode and playground assessment mode.
 
 ### Response Parsing
-- Extracts JSON from the LLM response by finding the first `{` and last `}`
-- Falls back to `{ progress: 0, reasoning: "Error parsing assessment result." }` on parse failure
+- `_try_parse_assessment_json` tries, in order: the raw text as JSON, the text with Markdown code fences stripped, the span between the first `{` and last `}`, and a regex extraction of `progress` and `reasoning`
+- `_normalize_assessment_result` validates and normalizes the parsed object
+- `_invoke_assessment_with_retry` makes up to 2 attempts; the second attempt appends an instruction to return strict JSON only
+- If both attempts fail, the result is `{ progress: 0, reasoning: "Error parsing assessment result." }`
+
+### Conversation Package Hardening
+- Stored chat roles come from the message type in DynamoDB, never from the message text
+- `_normalize_untrusted_text` applies Unicode NFKC normalization and strips invisible characters and look-alike whitespace
+- `_neutralize_role_prefixes` quotes (prefixes with `> `) any message line that imitates a turn marker (for example `AI: ...`) or an assessment section header, so student text cannot forge turns or scoring sections
 
 ---
 
@@ -350,9 +364,15 @@ Allows admins and instructors to test prompt configurations with custom model pa
     - Entry point — WebSocket-only (returns 400 for HTTP requests)
     - Accepts custom model configuration overrides: `model_id`, `temperature`, `top_p`, `max_tokens`
     - Uses `custom_prompt` as the system prompt (falls back to a default legal assistant prompt)
-    - Constructs session ID as `playground-{session_id}-{block_type}`
+    - Rejects callers without the `admin` or `instructor` role (defense in depth; the WebSocket `$default` handler checks this first)
+    - Constructs session ID as `playground-{user_id}-{session_id}-{block_type}`
+    - Rejects a `model_id` that is neither the active model nor one of the configured model options, and clamps `temperature`, `top_p`, and `max_tokens` to that model's constraints
+    - Applies the disclaimer gate and daily message limit
     - Applies Bedrock Guardrails to the test message input
     - Streams the response via WebSocket using `get_playground_streaming_response`
+
+- `get_model_options()`:
+    - Reads the `BedrockModelOptions` SSM parameter and returns `{model_id: constraints}`; returns an empty map on error, which limits the playground to the active model
 
 - `initialize_constants()`:
     - Fetches and caches model configuration from SSM Parameter Store
@@ -379,4 +399,4 @@ Admins/instructors can override the following per-request:
 - `top_p`: Nucleus sampling parameter
 - `max_tokens`: Maximum response length
 
-Values fall back to the SSM-configured defaults if not provided or if parsing fails.
+Values fall back to the SSM-configured defaults if not provided or if parsing fails. The model must be the active model or one of the configured options, and the numeric values are clamped to that model's constraints.

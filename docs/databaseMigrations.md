@@ -26,7 +26,7 @@ The LAIGO project uses a `node-pg-migrate` system to manage database schema chan
 
    ```bash
    ls cdk/lambda/db_setup/migrations/ | tail -1
-   # Use next sequential number (e.g., if last is 001, use 002)
+   # Use next sequential number (e.g., if last is 009, use 010)
    ```
 
 2. **Create migration file:**
@@ -68,7 +68,14 @@ cdk/lambda/db_setup/
 └── migrations/                             # Migration files directory
     ├── 000_initial_schema.js
     ├── 001_rename_unlocked_to_completed.js
-    └── ...
+    ├── 002_add_role_labels.js
+    ├── 003_add_summary_prompt_enums.js
+    ├── 004_seed_default_system_prompts.js
+    ├── 005_seed_default_disclaimer.js
+    ├── 006_add_cascade_to_case_reviewers.js
+    ├── 007_add_index_cases_student_id.js
+    ├── 008_unique_idp_id.js
+    └── 009_create_audit_log.js
 
 cdk/lib/dbFlow-stack.ts                     # Defines TriggerFunction that invokes db_setup Lambda on deploy
 cdk/layers/node-pg-migrate/package.json     # Layer dependencies (node-pg-migrate, pg)
@@ -145,12 +152,12 @@ exports.up = (pgm) => {
 
 ### Execution Flow
 
-1. **Trigger Creation**: `DBFlowStack` provisions a `triggers.TriggerFunction` (`<StackPrefix>-DBFlowStack-initializerFunction`)
+1. **Trigger Creation**: `DBFlowStack` provisions a `triggers.TriggerFunction` (`<StackPrefix>-DBFlowStack-initializerFunction`). Its description includes a build timestamp, so the trigger re-runs on every deploy.
 2. **Deployment Invocation**: During `cdk deploy`, the trigger invokes `cdk/lambda/db_setup/index.js`
 3. **Secrets Load**: The Lambda reads admin credentials from `DB_SECRET_NAME` in Secrets Manager
-4. **Migration Run**: `runMigrations()` executes `node-pg-migrate` in `up` direction against `migrations/`
+4. **Migration Run**: `runMigrations()` executes `node-pg-migrate` in `up` direction against `migrations/` over TLS through the RDS Proxy
 5. **Tracking Update**: `node-pg-migrate` records applied files in `pgmigrations`
-6. **Post-Migration Setup**: Lambda creates/rotates `app_rw` and `app_tc` users and updates app secrets
+6. **Post-Migration Setup**: The Lambda creates the `app_rw` and `app_tc` users if they are missing, re-applies the `readwrite` and `tablecreator` grants, makes `audit_log` append-only for those roles, and writes the credentials to the app secrets. Passwords already stored in the secrets are reused; a new password is only generated on first provisioning.
 
 ### Migration Tracking
 
@@ -167,8 +174,8 @@ graph TD
     C --> D[Run node-pg-migrate on migrations folder]
     D --> E[Apply Pending Migrations in Order]
     E --> F[Record Applied Rows in pgmigrations]
-    F --> G[Create/Rotate app_rw and app_tc users]
-    G --> H[Update user secrets in Secrets Manager]
+    F --> G[Create or update app_rw and app_tc users and grants]
+    G --> H[Write user credentials to Secrets Manager]
 ```
 
 ## Creating New Migrations
@@ -187,7 +194,7 @@ graph TD
 
    ```bash
    # Example: adding case tags support
-   touch cdk/lambda/db_setup/migrations/002_add_case_tags.js
+   touch cdk/lambda/db_setup/migrations/010_add_case_tags.js
    ```
 
 3. **Write the migration:**
@@ -403,9 +410,19 @@ For development or troubleshooting:
 # Option 1: invoke the deployed migration Lambda manually
 aws lambda invoke \
   --function-name <STACK_PREFIX>-DBFlowStack-initializerFunction \
+  --cli-binary-format raw-in-base64-out \
   --payload '{}' \
   /tmp/laigo-db-migration-response.json
+
+# Roll back the most recent migration (runs its exports.down; app users are not touched)
+aws lambda invoke \
+  --function-name <STACK_PREFIX>-DBFlowStack-initializerFunction \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"direction": "down", "count": 1}' \
+  /tmp/laigo-db-rollback-response.json
 ```
+
+The database runs in isolated subnets, so Option 2 below only works from a host inside the VPC (for example, the SageMaker notebook described in the [User Disable / Removal Guide](./userDisableRemovalGuide.md)).
 
 ```bash
 # Option 2: run node-pg-migrate locally (advanced)

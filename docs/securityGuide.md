@@ -23,16 +23,17 @@ This document outlines the existing network and security configurations implemen
 
 VPC Configuration:
 
-- Leveraged existing VPC in AWS Account since organizational policies prevent new VPC creation
-- CIDR Range is inherited from existing VPC configuration
+- By default, `VpcStack` creates a new VPC (CIDR `10.0.0.0/16`, overridable with the `vpcCidr` context value) across 2 Availability Zones in the deployment region
+- `VpcStack` also supports deploying into an existing VPC (for example, one managed by Control Tower) by setting `existingVpcId` and related values in `cdk/lib/vpc-stack.ts`
+- VPC flow logs capture all traffic to CloudWatch Logs (`/vpc/flow-logs/<StackPrefix>-VpcStack`, 3-month retention)
 
 #### Subnet Configuration:
 
-| Subnet Type | AZ            | Key Services                  |
-| ----------- | ------------- | ----------------------------- |
-| Private     | ca-central-1a | Lambda                        |
-| Private     | ca-central-1b | RDS Proxy, Amazon RDS         |
-| Public      | ca-central-1  | NAT Gateway, Internet Gateway |
+| Subnet Type                 | Key Services                                                         |
+| --------------------------- | -------------------------------------------------------------------- |
+| Private (with egress)       | VPC Lambda functions, SSM interface endpoint                         |
+| Private (isolated)          | Amazon RDS, RDS Proxy, Secrets Manager and RDS interface endpoints   |
+| Public                      | NAT Gateway (1), Internet Gateway                                    |
 
 #### Services Deployment:
 
@@ -46,19 +47,25 @@ VPC Configuration:
 
 - **Amazon RDS (PostgreSQL):**
 
-  - Accessed exclusively via RDS Proxy
-  - No direct public access
-  - Encrypted connections via SSL/TLS
+  - Deployed in isolated subnets with no route to the internet
+  - Accessed by the application via RDS Proxy
+  - No direct public access (`publiclyAccessible: false`)
+  - Encrypted connections enforced with `rds.force_ssl=1` and `requireTLS` on the proxy
 
-  Since VPC Endpoints are not used, Lambda accesses S3, ECR, and other AWS services over the public internet through the NAT Gateway.
+#### VPC Endpoints:
+
+- **Gateway endpoints:** Amazon S3 and Amazon DynamoDB
+- **Interface endpoints:** AWS Secrets Manager, Amazon RDS, and AWS Systems Manager (SSM)
+
+Traffic from VPC Lambda functions to these services stays on the AWS network. Other AWS service calls (for example, Bedrock, EventBridge, and ECR image pulls) go through the NAT Gateway.
 
 #### Public Subnets:
 
 - **NAT Gateway:** [Learn more](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html)
 
-  - Required for private subnet services to fetch external packages/updates
+  - Provides outbound internet access for Lambda functions in the private subnets
   - Egress-only internet access for Lambda
-  - Cost-optimized single AZ deployment
+  - Cost-optimized single NAT Gateway deployment
 
 - **Internet Gateway:** [Learn more](https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html)
   - Enables public access to API Gateway
@@ -67,8 +74,8 @@ VPC Configuration:
 
 - **S3 Buckets:** [Learn more](https://aws.amazon.com/pm/serv-s3/?gclid=CjwKCAiAlPu9BhAjEiwA5NDSA1VjMbPPYbzEKHPHFwna4OblKvQe5sm9sigb9iHW69Zc_pxuRifGzxoCUiEQAvD_BwE&trk=936e5692-d2c9-4e52-a837-088366a7ac3f&sc_channel=ps&ef_id=CjwKCAiAlPu9BhAjEiwA5NDSA1VjMbPPYbzEKHPHFwna4OblKvQe5sm9sigb9iHW69Zc_pxuRifGzxoCUiEQAvD_BwE:G:s&s_kwcid=AL!4422!3!536324434071!e!!g!!s3!11346198420!112250793838)
 
-  - Accessed via NAT Gateway through Lambda functions
-  - No internet routing through NAT Gateway
+  - Accessed by VPC Lambda functions through the S3 gateway endpoint
+  - Clients upload directly to S3 with pre-signed URLs
 
   #### How objects in S3 are accessed:
 
@@ -99,14 +106,16 @@ VPC Configuration:
   - All data is encrypted at rest using SSE-S3 (AES-256)
   - Public access is blocked for all S3 buckets
   - SSL connections are enforced for secure data transfer
+  - Lifecycle rules expire stored objects (for example, S3 access logs after 90 days)
 
 - **Amazon API Gateway:**
 
   - Deployed in AWS public cloud space
   - Protected by regional security controls
   - Custom Lambda Authorizers validate user permissions before accessing endpoints for 3 different roles
-  - Uses Cognito User Pools for authentication and role-based access control
-  - IAM policies restrict API Gateway access based on user roles
+  - Uses Cognito User Pools for authentication; roles come from the database
+  - Authorizers return IAM policies scoped to the role's endpoint prefix
+  - Stage throttling: 100 requests/second with a burst of 200
 
 - **Amazon Bedrock:**
 
@@ -128,8 +137,8 @@ VPC Configuration:
   - Authorization is database-driven
 
 - **Amazon ECR:**
-  - Lambda functions utilize Docker images stored in Amazon ECR
-  - Images are securely pulled over the internet via the NAT Gateway
+  - The `text_generation` and `playground_generation` Lambda functions run from Docker images stored in Amazon ECR
+  - The Lambda service pulls the images when the function is deployed or updated
 
 ## 1.2 Security Configuration
 
@@ -143,18 +152,17 @@ This diagram illustrates how our architecture handles key security aspects by le
 
 **Security Groups:**
 
-| Name         | Rules                              |
-| ------------ | ---------------------------------- |
-| Lambda-SG    | Allow outbound: 5432 (RDS Proxy)   |
-| RDS-Proxy-SG | Allow inbound: 5432 from Lambda-SG |
-| Default-SG   | Block all inbound, allow outbound  |
+| Name                   | Rules                                                                                     |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| `DbClientSecurityGroup` | Attached to the Lambda functions that need the database; outbound allowed              |
+| Database security group | Shared by RDS and RDS Proxy. Inbound 5432 from `DbClientSecurityGroup` and from itself (proxy to instance) |
+| Default-SG             | Block all inbound, allow outbound                                                         |
+
+Lambda functions that do not need the database (the WebSocket `$connect`, `$disconnect`, and `$default` handlers and the notification service) run outside the VPC.
 
 **NACLs:**
 
-- Default NACLs in use
-- No custom rules - inherits Control Tower baseline:
-  - Inbound: ALLOW ALL
-  - Outbound: ALLOW ALL
+- Default NACLs in use (allow all inbound and outbound); access control is enforced with security groups
 
 ### 2.2 Event-Driven Notification Security
 
@@ -176,13 +184,18 @@ This diagram illustrates how our architecture handles key security aspects by le
 
 **Purpose:** Ensure all stored data is encrypted at rest to meet compliance and security standards
 
+- RDS storage is encrypted (`storageEncrypted: true`) with the AWS-managed RDS key
+- S3 buckets use SSE-S3
+- DynamoDB tables use AWS-managed KMS keys (`TableEncryption.AWS_MANAGED`)
+
 ### 3.2 Access Controls
 
 #### RDS Proxy:
 
-- IAM authentication required
+- TLS required for all client connections (`requireTLS: true`)
+- Clients authenticate with database credentials stored in Secrets Manager; the proxy's IAM role reads those secrets and has `rds-db:connect` on this instance only
 - Connection pooling limits credential exposure
-- Audit logs enabled via CloudWatch
+- Application roles have least privilege: `app_rw` (via the `readwrite` role) for runtime handlers and `app_tc` (via `tablecreator`) for the admin handler. Neither role can `UPDATE`, `DELETE`, or `TRUNCATE` the `audit_log` table.
 
 ## 4. Secrets & Parameters
 
@@ -192,8 +205,16 @@ This diagram illustrates how our architecture handles key security aspects by le
 
 #### AWS Secrets Manager:
 
-- Creates a new secret named DBSecret for RDS credentials
-- Enhances security by regularly updating credentials without manual intervention
+- `LAIGOSecrets` (created manually before deployment) holds the database admin username
+- `<StackPrefix>-DatabaseStack-LAIGO/credentials/rdsDbCredential` holds the admin credentials generated by RDS
+- `<StackPrefix>-DatabaseStack-LAIGO/userCredentials/rdsDbCredential` and `.../userCredentials/TableCreator` hold the `app_rw` and `app_tc` credentials, written by the `db_setup` Lambda on each deploy
+- `<StackPrefix>-ApiStack-LAIGO_Cognito_Secrets` holds the Cognito IDs used by the frontend build and the Lambda authorizers
+- Automatic secret rotation is not configured. Each Lambda is granted read access only to the specific secrets it uses.
+
+#### AWS Systems Manager Parameter Store:
+
+- Runtime configuration (model ID, model options, temperature, top_p, max tokens, message limit, file size limit, case types, signup mode) is stored in SSM parameters. Only the admin handler has write access.
+- `/LAIGO/AllowedEmailDomains` is a `SecureString` created manually before deployment
 
 ## 5. Security Services
 
@@ -204,18 +225,26 @@ This diagram illustrates how our architecture handles key security aspects by le
 Two separate WAF Web ACLs protect the application:
 
 **CloudFront WAF** (scoped to Amplify frontend distribution, deployed in us-east-1):
-- AWSManagedRulesCommonRuleSet (covers SQLi, XSS, and other common web exploits)
+- AWSManagedRulesCommonRuleSet (common web exploits such as XSS)
+- AWSManagedRulesSQLiRuleSet
+- AWSManagedRulesKnownBadInputsRuleSet
+- AWSManagedRulesAmazonIpReputationList
 - Rate limiting: 1 000 requests per 5 minutes per IP
+- Logs to CloudWatch Logs (`aws-waf-logs-<StackPrefix>-WafStack-cloudfront`)
 
 **Regional API Gateway WAF** (scoped to REST API stage):
 - AWSManagedRulesCommonRuleSet (OWASP Top 10 protection)
+- AWSManagedRulesSQLiRuleSet
+- AWSManagedRulesKnownBadInputsRuleSet
+- AWSManagedRulesAmazonIpReputationList
 - IP-based rate limiting: 2 000 requests per 5 minutes per IP
 - Per-user rate limiting: 200 requests per 5 minutes per authenticated user (keyed on MD5 hash of Authorization header)
+- Logs to CloudWatch Logs (`aws-waf-logs-<StackPrefix>-ApiStack-api-gateway`)
 
 **Shield Standard:** [Learn more](https://docs.aws.amazon.com/waf/latest/developerguide/ddos-overview.html)
 
-- Enabled on CloudFront/Amplify distribution (protects API Gateway as well via passthrough)
-- CloudWatch alarms for DDoS detection
+- Shield Standard is applied automatically by AWS to CloudFront (used by Amplify Hosting) and regional API Gateway endpoints at no extra cost
+- CloudWatch alarms on WAF blocked-request spikes, IP and per-user rate-limit triggers, and API Gateway 4XX/5XX spikes publish to the `<StackPrefix>-ApiStack-security-alerts` SNS topic; set `SecurityAlertEmail` at deploy time to receive them by email
 
 ### 5.2 Security Hub
 
@@ -239,38 +268,47 @@ Two separate WAF Web ACLs protect the application:
 
 ### 6.1 RDS Encryption
 
-**Purpose:** Secure RDS data at rest using AWS KMS encryption and prevent accidental deletion
+**Purpose:** Secure RDS data at rest and prevent accidental deletion
 
-- Enabled storage encryption for storageEncrypted is set to true
-- Referenced an existing KMS key using kms.Key.fromKeyArn() for encryption
-- deletionProtection is set to true to prevent unintended RDS deletions.
+- RDS for PostgreSQL 17 on a `db.t4g.medium` instance in isolated subnets, single-AZ
+- `storageEncrypted: true`, using the AWS-managed RDS KMS key
+- `deletionProtection: true` to prevent unintended RDS deletions
+- `rds.force_ssl=1` in a custom parameter group, so the database rejects non-TLS connections
+- Automated backups retained for 7 days; enhanced monitoring every 60 seconds
+- PostgreSQL log export to CloudWatch (`cloudwatchLogsExports`) is not enabled
 
 ### 6.2 RDS Security Groups
 
-**Purpose:** Control database access by allowing PostgreSQL traffic (5432) only from trusted CIDRs
+**Purpose:** Control database access by allowing PostgreSQL traffic (5432) only from Lambda functions that need it
 
-CDK Implementation:
+CDK Implementation (`DatabaseStack`):
 
 ```typescript
-vpcStack.privateSubnetsCidrStrings.forEach((cidr) => {
-  dbSecurityGroup.addIngressRule(
-    ec2.Peer.ipv4(cidr),
-    ec2.Port.tcp(5432),
-    `Allow PostgreSQL traffic from ${cidr}`
-  );
+this.dbClientSecurityGroup = new ec2.SecurityGroup(this, `${id}-DbClientSecurityGroup`, {
+  vpc: vpcStack.vpc,
+  description: "Lambda functions authorized to connect to RDS Proxy on port 5432",
 });
+
+this.dbInstance.connections.allowFrom(
+  this.dbClientSecurityGroup,
+  ec2.Port.tcp(5432),
+  "Allow PostgreSQL from authorized Lambda functions",
+);
+
+// RDS Proxy shares the database security group and must reach the instance
+this.dbInstance.connections.allowInternally(ec2.Port.tcp(5432));
 ```
 
 ### 6.3 RDS Proxy
 
-**Purpose:** Purpose: Enhance RDS access performance, security, and scalability by utilizing Amazon RDS Proxy
+**Purpose:** Enhance RDS access performance, security, and scalability by utilizing Amazon RDS Proxy
 
-- IAM Authentication: RDS Proxy requires IAM authentication for secure access
+- Authentication: clients connect with database credentials from Secrets Manager (the proxy is registered with the admin, `app_rw`, and `app_tc` secrets)
 - Connection Pooling: Efficiently manages and reuses database connections, reducing the load on RDS
-- TLS Enforcement: Secure connections with optional TLS enforcement for data-in-transit encryption
-- Role Management: IAM roles grant rds-db:connect permissions to trusted Lambda functions
+- TLS Enforcement: `requireTLS: true`, so every client connection must use TLS
+- Proxy Role: the proxy's IAM role has `rds-db:connect` scoped to this database instance
 - Fault Tolerance: Proxies automatically handle database failovers, improving application availability
-- Security Groups: Configured to allow only trusted Lambda functions and services within private subnets to connect
+- Security Groups: shares the database security group, which only admits `DbClientSecurityGroup`
 
 ## 7. S3 Security
 
@@ -298,63 +336,45 @@ encryption: s3.BucketEncryption.S3_MANAGED,
 
 | **Component**               | **CDK Location**  | **Key Security Control**                                                                                                 | **Purpose**                                                   |
 | --------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| **RDS**                     | `DatabaseStack`   | PostgreSQL (5432) only from private/VPC CIDRs                                                                            | Restricts DB access to internal networks                      |
-| **Lambda**                  | `ApiGatewayStack` | IAM policies for Secrets and ENI management access                                                                       | Limits Lambda access to necessary resources                   |
+| **RDS**                     | `DatabaseStack`   | PostgreSQL (5432) only from `DbClientSecurityGroup` and the proxy (same security group)                                  | Restricts DB access to Lambda functions that need it          |
+| **Lambda**                  | `ApiGatewayStack` | One IAM role per function, granted only the secrets, parameters, tables, and buckets it uses                             | Limits Lambda access to necessary resources                   |
 | **Lambda Authorizers**      | `ApiGatewayStack` | VPC-deployed with DB access; dedicated IAM roles with Secrets Manager read (IDP + DB credentials)                        | Enables database-backed identity resolution and role validation |
 | **EventBridge + WebSocket** | `ApiGatewayStack` | Scoped `events:PutEvents` (publish), EventBridge rule filtering, and scoped `execute-api:ManageConnections` for delivery | Ensures secure, authenticated real-time notification delivery |
-| **RDS Proxy**               | `DatabaseStack`   | IAM-based `rds-db:connect` permissions                                                                                   | Adds an extra layer of security between Lambda and RDS        |
+| **RDS Proxy**               | `DatabaseStack`   | TLS required; proxy role has `rds-db:connect` on this instance only                                                      | Adds an extra layer of security between Lambda and RDS        |
 
 ### 8.2 Examples from CDK infrastructure where these security measures are implemented:
 
-#### Lambda Access to Secrets Manager:
+#### Lambda Access to Secrets Manager (scoped to specific secrets):
 
-```javascript
-lambdaRole.addToPolicy(
-  new iam.PolicyStatement({
-    actions: ["secretsmanager:GetSecretValue"],
-    resources: [
-      `arn:aws:secretsmanager:${this.region}:${this.account}:secret:*`,
-    ],
-  })
+```typescript
+// Admin authorizer: IDP config + the app_rw database secret, nothing else
+this.secret.grantRead(adminAuthorizerRole);
+db.secretPathUser.grantRead(adminAuthorizerRole);
+
+// Admin handler uses the table-creator (app_tc) secret instead
+db.secretPathTableCreator.grantRead(adminFunctionRole);
+```
+
+#### Database Access: PostgreSQL (port 5432) only from the database client security group
+
+```typescript
+this.dbInstance.connections.allowFrom(
+  this.dbClientSecurityGroup,
+  ec2.Port.tcp(5432),
+  "Allow PostgreSQL from authorized Lambda functions",
 );
 ```
 
-#### Private Subnet Access: Allows PostgreSQL traffic (port 5432) only from private subnet CIDRs:
+#### Lambda Network Access: VPC Lambdas attach the client security group
 
 ```typescript
-vpcStack.privateSubnetsCidrStrings.forEach((cidr) => {
-  dbSecurityGroup.addIngressRule(
-    ec2.Peer.ipv4(cidr),
-    ec2.Port.tcp(5432),
-    `Allow PostgreSQL traffic from private subnet CIDR range ${cidr}`
-  );
+const lambdaStudentFunction = new lambda.Function(this, `${id}-studentFunction`, {
+  // ...
+  vpc: vpcStack.vpc,
+  vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+  securityGroups: [dbClientSg],
+  role: studentFunctionRole,
 });
-```
-
-#### Lambda Network Access: Enables Lambda to create network interfaces (ENIs) for VPC access
-
-```typescript
-this.dbInstance.connections.securityGroups.forEach((securityGroup) => {
-  securityGroup.addIngressRule(
-    ec2.Peer.ipv4(vpcStack.vpcCidrString),
-    ec2.Port.tcp(5432),
-    "Allow PostgreSQL traffic from public subnets"
-  );
-});
-```
-
-#### Lambda Access to Secrets Manager:
-
-```typescript
-lambdaRole.addToPolicy(
-  new iam.PolicyStatement({
-    effect: iam.Effect.ALLOW,
-    actions: ["secretsmanager:GetSecretValue"],
-    resources: [
-      `arn:aws:secretsmanager:${this.region}:${this.account}:secret:*`,
-    ],
-  })
-);
 ```
 
 ### 8.3 Lambda Function Access & Invocation
@@ -363,23 +383,25 @@ lambdaRole.addToPolicy(
 
 | **Lambda Function**                 | **Access Level** | **Trigger/Invocation**                     | **Who Can Access?**                         |
 | ----------------------------------- | ---------------- | ------------------------------------------ | ------------------------------------------- |
-| `studentFunction`                   | Private          | student                                    | Authenticated users in **student** group    |
-| `instructorFunction`                | Private          | instructor                                 | Authenticated users in **instructor** group |
-| `adminFunction`                     | Private          | admin                                      | Authenticated users in **admin** group      |
+| `studentFunction`                   | Private          | REST `/student/*`                          | Users with the **student** role; shared and instructor case-view routes are also open to other roles (see 10.3) |
+| `instructorFunction`                | Private          | REST `/instructor/*`                       | Users with the **instructor** role          |
+| `adminFunction`                     | Private          | REST `/admin/*`                            | Users with the **admin** role               |
 | `preSignupLambda`                   | Private          | Cognito **Pre-Sign-Up** trigger            | **Cognito internal trigger** only           |
 | `addStudentOnSignUp`                | Private          | Cognito **Post-Confirmation** trigger      | **Cognito internal trigger** only           |
-| `TextGenLambdaDockerFunc`           | Private          | student/instructor                         | **student or instructor** group users       |
-| `GeneratePreSignedURLFunc`          | Private          | student/instructor                         | **student or instructor** group users       |
-| `CaseGenLambdaDockerFunc`           | Private          | student                                    | **student** group users                     |
-| `SummaryLambdaDockerFunction`       | Private          | student/instructor                         | **student or instructor** group users       |
-| `audioToTextFunc`                   | Private          | student                                    | **student** group users                     |
-| `PlaygroundTextGenLambdaDockerFunc` | Private          | student/instructor                         | **student or instructor** group users       |
-| `assessProgressFunction`            | Private          | student                                    | **student** group users                     |
-| `notificationServiceFunction`       | Private          | EventBridge / API Gateway                  | Internal event‑driven notification service  |
+| `TextGenLambdaDockerFunc`           | Private          | REST `POST /student/text_generation`; WebSocket `generate_text` | Case owner (the handler checks ownership) |
+| `GeneratePreSignedURLFunc`          | Private          | REST `GET /student/generate_presigned_url` | Users with the **student** role             |
+| `CaseGenLambdaDockerFunc`           | Private          | REST `POST /student/new_case`              | Users with the **student** role             |
+| `SummaryGenerationFunction`         | Private          | REST `GET /student/generate_summary`; WebSocket `generate_summary` | Case owner or an instructor of the case owner |
+| `audioToTextFunction`               | Private          | REST `GET /student/audio_to_text`; WebSocket `audio_to_text` | Users with the **student** role |
+| `PlaygroundTextGenLambdaDockerFunc` | Private          | WebSocket `playground_test`                | Users with the **admin** or **instructor** role |
+| `AssessProgressFunction`            | Private          | REST `POST /student/assess_progress`; WebSocket `assess_progress` and `playground_assess` | Case owner; playground mode requires **admin** or **instructor** |
+| `notificationServiceFunction`       | Private          | EventBridge / REST `/student/notifications*` | Internal notification service; REST routes act only on the caller's own notifications |
 | `adminLambdaAuthorizer`             | Private (VPC)    | API Gateway Lambda Authorizer (admin)      | Internal to **API Gateway**; validates JWT + DB role lookup |
 | `studentLambdaAuthorizer`           | Private (VPC)    | API Gateway Lambda Authorizer (student)    | Internal to **API Gateway**; validates JWT + DB role lookup |
 | `instructorLambdaAuthorizer`        | Private (VPC)    | API Gateway Lambda Authorizer (instructor) | Internal to **API Gateway**; validates JWT + DB role lookup |
-| `wsAuthorizer`                      | Private (VPC)    | API Gateway WebSocket Authorizer ($connect)| Internal to **API Gateway**; validates JWT + DB user lookup |
+| `WsAuthorizer`                      | Private (VPC)    | API Gateway WebSocket Authorizer ($connect)| Internal to **API Gateway**; validates JWT + DB user lookup |
+
+All AI functions also require the caller to have accepted the active disclaimer and enforce the daily message limit before calling Bedrock.
 
 ## 9. Cognito User Authentication
 
@@ -402,8 +424,8 @@ AWS Cognito provides user authentication and authorization, enabling **secure ac
 - **User Provisioning Bootstrapping:**
   Cognito Lambda triggers handle user account setup:
 
-  - **Pre-Sign-Up** trigger: Validates email domains before user registration (only allows emails from authorized domains)
-  - **Post-Confirmation** trigger: Creates user record in database immediately after email verification
+  - **Pre-Sign-Up** trigger: Validates email domains before user registration (only allows emails from authorized domains) and, when signup mode is `whitelist`, rejects emails that are not on the whitelist. If the signup mode cannot be read, it fails closed.
+  - **Post-Confirmation** trigger: Creates user record in database immediately after email verification. The first user becomes `admin` (assignment is serialized so two simultaneous sign-ups cannot both become admin); in whitelist mode the role comes from the whitelist entry.
   - Authorization logic is handled by Lambda authorizers (not via Cognito triggers), ensuring real-time role/permission checks via database queries
 
 - **Lambda Authorization (Database-Backed):**
@@ -447,18 +469,27 @@ this.userPool = new cognito.UserPool(this, `${id}-pool`, {
     requireDigits: true,
     requireSymbols: true,
   },
+  email: emailConfig,
   accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+  removalPolicy: cdk.RemovalPolicy.RETAIN,
 });
 
 this.appClient = this.userPool.addClient(`${id}-pool`, {
   userPoolClientName: userPoolName,
   authFlows: {
-    userPassword: true,
-    custom: true,
+    userPassword: false, // SRP only
+    custom: false,
     userSrp: true,
   },
+  accessTokenValidity: cdk.Duration.minutes(30),
+  idTokenValidity: cdk.Duration.minutes(30),
+  refreshTokenValidity: cdk.Duration.days(7),
+  enableTokenRevocation: true,
+  preventUserExistenceErrors: true,
 });
 ```
+
+The identity pool disallows unauthenticated identities. The frontend stores Amplify tokens in `sessionStorage`, so they are cleared when the browser tab closes.
 
 #### **Authorizer Lambda Configuration (Database-Backed):**
 
@@ -498,12 +529,12 @@ const adminAuthorizerFunction = new lambda.Function(this, `${id}-AdminAuthorizer
 
 ### 9.4 Cognito Email Delivery Security (SES + DKIM)
 
-When `DomainName` is provided to CDK deployment, Cognito email delivery is configured to use Amazon SES with a domain identity.
+When `SesVerifiedDomain` is provided to CDK deployment, Cognito email delivery is configured to use Amazon SES with a domain identity. This is independent of `DomainName`.
 
 - CDK creates an SES `EmailIdentity` using the Route 53 hosted zone for the domain.
 - DKIM and MAIL FROM DNS records are managed automatically in Route 53.
-- Verification emails are sent from `noreply@<DomainName>` using the verified domain identity.
-- If `DomainName` is omitted, Cognito falls back to its built-in sender (`no-reply@verificationemail.com`).
+- Verification emails are sent from `noreply@<SesVerifiedDomain>` using the verified domain identity.
+- If `SesVerifiedDomain` is omitted, Cognito falls back to its built-in sender (`no-reply@verificationemail.com`).
 
 Security and operational notes:
 
@@ -645,10 +676,12 @@ AWS Systems Manager (SSM) provides centralized management, automation, and secur
 
 Amazon CloudWatch is used to monitor AWS resources, applications, and security logs. It plays a crucial role in performance monitoring [Learn more](https://aws.amazon.com/systems-manager/)
 
-### 12.2 Security Measures:
+### 12.2 Recommended Monitoring (not configured by the CDK app):
 
-- Parameter Store Access Logs: Monitors access to sensitive configuration data, including secrets and API keys
-- Anomalous Parameter Store Access: Triggers alarms when unauthorized services or users attempt to retrieve sensitive parameters
+- Parameter Store Access Logs: use CloudTrail to monitor access to sensitive configuration data
+- Anomalous Parameter Store Access: add alarms for unauthorized services or users attempting to retrieve sensitive parameters
+
+Parameter Store values used by LAIGO are listed in [4.1 Credential Management](#41-credential-management). VPC Lambdas reach SSM through an interface endpoint.
 
 ## 13 AWS Key Management Service (KMS)
 
@@ -656,10 +689,12 @@ Amazon CloudWatch is used to monitor AWS resources, applications, and security l
 
 AWS KMS (Key Management Service) provides centralized encryption key management, helping to keep sensitive data encrypted both at rest and in transit. It integrates with multiple AWS services to offer scalable and automated encryption security [Learn more](https://aws.amazon.com/kms/)
 
-### 13.2 Security Measures:
+### 13.2 Recommended Monitoring (not configured by the CDK app):
 
-- KMS Key Access Logs: Records every use of an encryption key to help detect unauthorized decryption attempts
-- Excessive Key Usage: Triggers alerts if a specific key is accessed more than usual, potentially indicating a compromise
+- KMS Key Access Logs: CloudTrail records every use of an encryption key to help detect unauthorized decryption attempts
+- Excessive Key Usage: add alerts if a specific key is accessed more than usual, potentially indicating a compromise
+
+LAIGO uses AWS-managed keys (RDS, DynamoDB) and SSE-S3; no customer-managed KMS keys are created.
 
 ## 14. Amazon ECR
 
@@ -687,10 +722,11 @@ Amazon Elastic Container Registry (ECR) provides a secure, scalable private cont
 
 4. **Lifecycle Policies**
 
-   - Automatically remove outdated images to minimize storage costs and reduce the attack surface.
+   - No ECR lifecycle policy is configured yet, so old images accumulate (see the recommendation below).
 
 5. **Image Scanning**
-   - All ECR repos have image scanning enabled to detect vulnerabilites and remediate issues.
+   - All ECR repos have scan-on-push enabled.
+   - The CodeBuild stage waits for the scan and stops the deployment if it finds `CRITICAL` or `HIGH` findings. Only scan-approved images are deployed: the pipeline records the approved image digest in SSM, and the Lambda functions are updated to that digest.
 
 ---
 

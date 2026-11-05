@@ -1,5 +1,7 @@
 # User Disable / Removal Guide
 
+> **Superseded:** use the [User Disable / Removal Guide](./userDisableRemovalGuide.md) instead. This older copy does not cover deleting the user's DynamoDB data.
+
 This guide documents how to disable or completely remove a user from the LAIGO platform. Because there is no built-in admin UI for user disable/deletion, the process requires manual SQL execution against the database and/or a Cognito console action.
 
 - Option 1: Disable the user (preferred for temporary account suspension or when records must be retained).
@@ -11,14 +13,14 @@ This guide documents how to disable or completely remove a user from the LAIGO p
   - Amazon SageMaker AI (to create a notebook instance in the VPC)
   - Amazon Cognito (to delete the user from the User Pool)
   - AWS Secrets Manager (to retrieve database credentials from the console)
-- The user's email address or `cognito_id` (UUID)
+- The user's email address or `idp_id` (the Cognito `sub`, a UUID)
 
 ## Overview
 
 User data lives in two places:
 
 1. **PostgreSQL (RDS)** — the `users` table and all related records across multiple tables
-2. **AWS Cognito** — the user's authentication identity and group membership
+2. **AWS Cognito** — the user's authentication identity
 
 Both the database and Cognito must be cleaned for a full removal.
 
@@ -46,7 +48,7 @@ The RDS instance runs inside an isolated VPC with no public access. Use a SageMa
 
 - Choose one of the **private subnets** (labeled `private-subnet-1` in the VPC). Do not use the isolated subnets — the notebook needs internet access to install Python packages via pip.
 
-![Select Subnet](./media/isolated-subnet.png)
+![Select Subnet](./media/private-subnet.png)
 
 ### 1d. Select the Security Group
 
@@ -76,7 +78,7 @@ import psycopg2
 
 Retrieve the credentials from the AWS Console:
 1. **RDS Proxy endpoint**: Navigate to **RDS** > **Proxies** > select your proxy > copy the **Proxy endpoint** (looks like `xxxxx-proxy.proxy-xxxxx.region.rds.amazonaws.com`)
-2. **Username and password**: Navigate to **Secrets Manager** > search for `{StackPrefix}-LAIGO/credentials/rdsDbCredential` > click **Retrieve secret value** > copy the `username` and `password`
+2. **Username and password**: Navigate to **Secrets Manager** > search for `{StackPrefix}-DatabaseStack-LAIGO/credentials/rdsDbCredential` > click **Retrieve secret value** > copy the `username` and `password`
 
 ```python
 DB_HOST = ""      # <-- Paste the RDS Proxy endpoint from RDS Proxies
@@ -213,7 +215,7 @@ print("Connection closed")
 If you want to prevent the user from logging into the app while keeping their data intact, disable them in Cognito instead of deleting them.
 
 1. Open the **AWS Console** and navigate to **Amazon Cognito**
-2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-pool` or similar)
+2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-UserPool`)
 3. Go to **Users** and search for the user by email
 4. Select the user and click **Disable user**
 
@@ -233,7 +235,7 @@ aws cognito-idp admin-disable-user \
 ## Step 5: Remove the User from Cognito
 
 1. Open the **AWS Console** and navigate to **Amazon Cognito**
-2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-pool` or similar)
+2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-UserPool`)
 3. Go to **Users** and search for the user by email
 4. Select the user and click **Delete user**
 

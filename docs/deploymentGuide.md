@@ -37,7 +37,7 @@ Before you deploy, ensure the following are available locally:
 - [AWS Account](https://aws.amazon.com/account/)
 - [GitHub Account](https://github.com/)
 - [AWS CLI v2](https://aws.amazon.com/cli/)
-- [Node.js](https://nodejs.org/en/download) _(20.x or newer recommended)_
+- [Node.js](https://nodejs.org/en/download) _(20.19+ or 22.12+, required by Vite 8; 24.x recommended to match the Lambda runtime)_
 - [npm](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm)
 
 You also need AWS credentials configured (`aws configure` or SSO profile), and permissions to create IAM roles, VPC, RDS, API Gateway, Cognito, Lambda, Amplify, CodePipeline, CodeBuild, ECR, WAF, SSM, Secrets Manager, and CloudWatch resources.
@@ -414,8 +414,10 @@ LAIGO supports several optional context parameters. `DomainName` and `FrontendOr
 | `DomainName` | Custom frontend domain (registered in Amplify) and CORS lockdown | You want a branded URL and tighter API security |
 | `FrontendOrigin` | CORS lockdown only, without registering a custom domain | You run `prod` on the default Amplify domain and want restricted CORS |
 | `SesVerifiedDomain` | SES-based email for Cognito | You need more than ~50 sign-ups/day, or want branded sender emails |
+| `SecurityAlertEmail` | Email address subscribed to the security-alerts SNS topic that the CloudWatch security alarms publish to | You want alarm notifications by email. AWS sends a confirmation email that must be accepted. Without it, the topic is created with no subscribers. |
+| `Owner`, `CostCenter` | Extra cost-allocation tags applied to every resource | Your organization requires owner or cost-center tags |
 
-See the [Requirements](#requirements) section for full details and prerequisites for each option.
+See the [Requirements](#requirements) section for full details and prerequisites for the domain and SES options. Add any optional parameter to the deploy commands below with `--context <Name>=<value>`.
 
 #### 3.4 Deploy CDK stacks
 
@@ -568,9 +570,17 @@ The first user to sign up is automatically assigned the `admin` role. However, `
 
 To take down the deployed stack for a fresh redeployment in the future, navigate to AWS CloudFormation on the AWS Console, click on the stack and hit Delete.
 
-Please wait for the stacks in each step to be properly deleted before deleting the stack downstream.
+Delete the stacks in reverse dependency order and wait for each one to finish: `WafStack`, `AmplifyStack`, `ApiStack`, `CICDStack`, `DBFlowStack`, `DatabaseStack`, then `VpcStack`.
 
-Also make sure to delete secrets in Secrets Manager.
+Several resources are retained when their stack is deleted, so data is not lost by accident. Delete them manually if you no longer need them:
+
+- Cognito user pool (`<StackPrefix>-ApiStack-UserPool`)
+- DynamoDB conversation table (`<StackPrefix>-ApiStack-Conversation-Table`) and email whitelist table (`<StackPrefix>-ApiStack-email-whitelist`)
+- ECR repositories created by the CICD stack
+- VPC flow log, WAF, and Bedrock invocation log groups in CloudWatch Logs
+- In `prod` only: the S3 buckets, the notifications and connections tables, the dead-letter queues, and the API access log group
+
+Also delete the secrets and parameters you created in [Step 2](#step-2-upload-secrets) if you are not redeploying.
 
 ## Troubleshooting
 
@@ -578,7 +588,7 @@ Also make sure to delete secrets in Secrets Manager.
 
 Sometimes stack deletion can fail. If you encounter issues while taking down your stacks:
 
-1. **Aurora Database**: disable delete protection in Aurora for the database before attempting stack deletion, specifically when deleting the Database stack.
+1. **RDS Database**: the RDS PostgreSQL instance has deletion protection enabled. Disable it (RDS > Databases > select the instance > Modify > uncheck **Enable deletion protection**) before deleting the Database stack.
 2. **ECR Repository**: ensure that nothing is present in ECR (Elastic Container Registry). Sometimes the stacks fail deletion due to remaining container images.
 3. **Manual Cleanup**: if stacks continue to fail deletion, you may need to manually delete resources from ECR and other services before retrying the stack deletion.
 

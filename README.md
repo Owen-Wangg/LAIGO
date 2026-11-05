@@ -11,7 +11,7 @@ This prototype explores how Large Language Models (LLMs) can enhance legal workf
 | [API Documentation](#api-documentation)             | Documentation on the API the project uses               |
 | [Credits](#credits)                                 | Meet the team behind the solution                       |
 | [License](#license)                                 | License details                                         |
-| [User Removal](#user-removal)                       | How to completely remove a user from the platform       |
+| [User Removal](#user-removal)                       | How to disable or completely remove a user              |
 
 ## High-Level Architecture
 
@@ -53,7 +53,8 @@ Please refer to the [Web App User Guide](./docs/userGuide.md) for instructions o
 │   │   ├── vpc-stack.ts            # VPC and networking
 │   │   ├── amplify-stack.ts        # Frontend hosting
 │   │   ├── cicd-stack.ts           # CI/CD pipeline
-│   │   └── waf-stack.ts            # WAF configuration
+│   │   ├── waf-stack.ts            # WAF configuration
+│   │   └── shared/                 # Environment parsing and resource tagging helpers
 │   ├── test/                       # CDK tests
 │   └── OpenAPI_Swagger_Definition.yaml
 │
@@ -67,9 +68,8 @@ Please refer to the [Web App User Guide](./docs/userGuide.md) for instructions o
 │       │   ├── Help/               # Help and onboarding components
 │       │   ├── Notifications/      # Notification system components
 │       │   └── Supervisor/         # Supervisor/instructor components
-│       ├── contexts/               # React Context providers (user, theme)
+│       ├── contexts/               # React Context providers (user, notifications, role labels)
 │       ├── hooks/                  # Custom React hooks (useWebSocket, etc.)
-│       ├── lib/                    # Shared library utilities
 │       ├── pages/                  # Page components
 │       │   ├── Admin/              # Admin dashboard, AI configuration, settings
 │       │   ├── Advocate/           # Student/advocate dashboard and case management
@@ -90,13 +90,14 @@ Please refer to the [Web App User Guide](./docs/userGuide.md) for instructions o
 │   ├── deploymentGuide.md          # Deployment instructions
 │   ├── modificationGuide.md        # Customization guide
 │   ├── securityGuide.md            # Security documentation
+│   ├── userDisableRemovalGuide.md  # Disabling or fully removing a user
 │   └── userGuide.md                # End-user guide
 ```
 
 - `/cdk`: AWS CDK infrastructure code (TypeScript)
   - `/bin`: CDK app entry point and stack orchestration
-  - `/lambda`: Lambda function source code (Node.js 24.x and Python 3.11/3.12)
-  - `/layers`: Lambda layers for shared dependencies (postgres, psycopg3, aws-jwt-verify)
+  - `/lambda`: Lambda function source code (Node.js 24.x and Python 3.12)
+  - `/layers`: Lambda layers for shared dependencies (postgres, node-pg-migrate, psycopg3, aws-jwt-verify, bedrock_client)
   - `/lib`: CDK stack definitions for all infrastructure (VPC, database, API, auth, hosting, WAF)
 - `/frontend`: React 19 frontend application (TypeScript, Vite, MUI, Tailwind CSS)
   - `/src/components`: Reusable UI components organized by feature area

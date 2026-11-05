@@ -56,21 +56,25 @@ The panel includes:
 
 The Signup Access tab allows administrators to control whether the application allows anyone to sign up, or only certain emails can sign up. Administrators can toggle public signup on and off, and upload a csv whitelist formatted as "email,role" to allow specific users to sign up.
 
-- Users that signup when public signup is disabled, will be given the role based on the whitelist.
+- In both modes, the email domain must be in the allowed domain list set at deployment (`/LAIGO/AllowedEmailDomains`).
+- Users that sign up while public signup is disabled are given the role from their whitelist entry.
+- Users that sign up while public signup is enabled are given the advocate role.
+- The role column takes the role labels currently configured in the Terminology tab (for example "Advocate" or "Supervisor"), case-insensitive. An optional header row `email,role` is skipped.
+- Uploading a CSV replaces the existing whitelist.
 
 ![image](./media/admin-whitelist.png)
 
 #### Prompt Management
 
-Administrators can edit the system prompts that run various parts of the application.
+Administrators can edit the system prompts that run various parts of the application. The sidebar groups them into reasoning prompts (one per interview stage), assessment prompts (one per stage), and summary prompts (one per stage plus "Full Case Synthesis").
 
 The Version History panel allows admins to view existing versions of a particular system prompt, change the current active prompt for the application, delete versions, and also load versions into the Prompt Workspace to make modifications.
 
 ![image](media/admin-version-history.png)
 
-The Prompt Workspace allows administrators to:
+The Workspace panel allows administrators to:
 
-- Create new prompt versions by clicking the "Start new Draft" button in the top right
+- Create new prompt versions by clicking the "Start New Draft" button in the top right
 - Overwrite previous versions with new modifications by loading a previous prompt and clicking "Save".
 - Use a previous version as a template by loading a previous prompt, making modifications, and clicking "Save as New Version"
 
@@ -155,11 +159,11 @@ The Interview Assistant is divided into 4 stages, each focusing on a different a
 3. **Contrarian Analysis** — Explore counterarguments and weaknesses in your position. The AI challenges your reasoning to help you prepare for opposing perspectives.
 4. **Policy Context** — Consider the broader policy implications and societal context surrounding the case, helping you understand how your arguments fit within larger legal and social frameworks.
 
-Each stage has its own progress bar. As you interact with the AI and demonstrate thorough analysis, the progress bar fills up. Once a stage is complete, the next stage unlocks automatically.
+Each stage has its own progress bar. As you interact with the AI and demonstrate thorough analysis, the progress bar fills up. All stages can be opened at any time from the side menu. When a stage is complete, its progress bar is replaced by a completion message and the stage shows a check mark in the side menu.
 
 ![image](./media/advocate-interview-assistant.png)
 
-Upon interacting with the AI Assistant, the advocate can choose to generate a downloadable summary pdf of the information and insights from the LLM by clicking on the "Generate Summary" button below the AI message. This button then generates a downloadable pdf version of a summary which is viewable from the "Case Summaries" page:
+Upon interacting with the AI Assistant, the advocate can choose to generate a downloadable summary pdf of the information and insights from the LLM by clicking on the "GENERATE SUMMARY" button below the AI message. This button then generates a downloadable pdf version of a summary which is viewable from the "Case Summaries" page:
 
 - Users may also generate a full case summary by generating individual summaries across the 4 stages first, then clicking "Generate Full Case Summary".
 

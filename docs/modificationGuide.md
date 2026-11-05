@@ -145,7 +145,7 @@ When deploying to production via Amplify:
 
 - Amplify uses the `VITE_API_ENDPOINT` environment variable configured in `cdk/lib/amplify-stack.ts`
 - This is set to the actual API Gateway endpoint (e.g., `https://your-api.execute-api.region.amazonaws.com/prod`)
-- No proxy is needed because Amplify serves the frontend from your custom domain, making requests same-origin
+- No proxy is needed because the API returns CORS headers for the configured frontend origin (`DomainName` or `FrontendOrigin`; see the [Deployment Guide](./deploymentGuide.md#custom-domain-optional))
 - The `VITE_API_PROXY_TARGET` variable is only used locally and is not deployed
 
 ### Troubleshooting
@@ -180,7 +180,7 @@ Backend notes:
 - Authentication policy details in this same block (`passwordPolicy`, `autoVerify`, recovery options) impact user sign-up/login behavior across frontend and backend.
 - After editing this block, redeploy CDK so Cognito updates are applied.
 
-For reference, the full code is shown below (as it is at the time this documentation was written).
+For reference, an abridged version of the code is shown below (CSS omitted). The file in `cdk/lib/api-stack.ts` is the source of truth.
 
 ```javascript
 const userPoolName = `${id}-UserPool`;
@@ -194,80 +194,29 @@ this.userPool = new cognito.UserPool(this, `${id}-pool`, {
     email: true,
   },
   userVerification: {
-    emailSubject: "Legal Aid Tool - Confirmation Code",
+    emailSubject: "LAIGO AI Assistant - Verify your email",
     emailBody: `
     <html>
       <head>
         <style>
-          body {
-            font-family: Outfit, sans-serif;
-            background-color: #F5F5F5;
-            color: #111835;
-            margin: 0;
-            padding: 0;
-            font-size: 16px;
-          }
-          .email-container {
-            background-color: #ffffff;
-            width: 100%;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-            border-radius: 8px;
-            border: 1px solid #ddd;
-          }
-          .header {
-            text-align: center;
-            margin-bottom: 20px;
-          }
-          .header img {
-            width: 100px;
-            height: auto;
-          }
-          .main-content {
-            text-align: center;
-            font-size: 18px;
-            color: #444;
-            margin-bottom: 30px;
-          }
-          .code {
-            display: inline-block;
-            background-color: #111835;
-            color: #ffffff;
-            font-size: 24px;
-            font-weight: bold;
-            padding: 15px 25px;
-            border-radius: 4px;
-            margin-top: 20px;
-            margin-bottom: 20px;
-          }
-          .footer {
-            text-align: center;
-            font-size: 14px;
-            color: #888;
-          }
-          .footer a {
-            color: #546bdf;
-            text-decoration: none;
-          }
+          /* body, .email-container, .header, .main-content, .code, .footer styles */
         </style>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&display=swap" rel="stylesheet">
       </head>
       <body>
         <div class="email-container">
           <div class="header">
-            <h1>Legal Aid Tool</h1>
-            <!--<img src="" alt="Legal Aid Tool Logo" width="150" height="auto"/>-->
+            <h1>LAIGO AI Assistant</h1>
           </div>
           <div class="main-content">
-            <p>Thank you for signing up for Legal Aid Tool!</p>
+            <p>Thank you for signing up for LAIGO AI Assistant!</p>
             <p>Verify your email by using the code below:</p>
             <div class="code">{####}</div>
             <p>If you did not request this verification, please ignore this email.</p>
           </div>
           <div class="footer">
             <p>Please do not reply to this email.</p>
-            <p>Legal Aid Tool, 2025</p>
+            <p>LAIGO AI Assistants, 2025</p>
           </div>
         </div>
       </body>
@@ -276,16 +225,19 @@ this.userPool = new cognito.UserPool(this, `${id}-pool`, {
     emailStyle: cognito.VerificationEmailStyle.CODE,
   },
   passwordPolicy: {
-    minLength: 8,
+    minLength: 12,
     requireLowercase: true,
     requireUppercase: true,
     requireDigits: true,
-    requireSymbols: false,
+    requireSymbols: true,
   },
+  email: emailConfig, // SES when SesVerifiedDomain is set, otherwise Cognito's built-in sender
   accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-  removalPolicy: cdk.RemovalPolicy.DESTROY,
+  removalPolicy: cdk.RemovalPolicy.RETAIN,
 });
 ```
+
+If you change `passwordPolicy`, update the matching password checks in the frontend sign-up form (`frontend/src/pages/Login.tsx`) so users see the same rules.
 
 ## Extending the API
 
@@ -306,19 +258,27 @@ Example (`NodeJS` lambda):
 ```typescript
 const myHandler = new lambda.Function(this, `${id}-MyHandler`, {
   runtime: lambda.Runtime.NODEJS_24_X,
-  code: lambda.Code.fromAsset("lambda"),
-  handler: "handlers/myHandler.handler",
+  code: lambda.Code.fromAsset("lambda/handlers"),
+  handler: "myHandler.handler",
+  timeout: Duration.seconds(29),
+  vpc: vpcStack.vpc,
+  vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+  securityGroups: [dbClientSg], // required to reach the RDS Proxy
   environment: {
     SM_DB_CREDENTIALS: db.secretPathUser.secretName,
     RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
+    ...corsEnv, // ALLOWED_ORIGIN for CORS response headers
   },
+  layers: [postgres, javascriptPowertoolsLayer],
+  role: myHandlerRole, // dedicated least-privilege role; grant only what the handler needs
 });
+db.secretPathUser.grantRead(myHandler);
 
 const cfnMyHandler = myHandler.node.defaultChild as lambda.CfnFunction;
 cfnMyHandler.overrideLogicalId("myHandler");
 ```
 
-Then update `cdk/OpenAPI_Swagger_Definition.yaml` to add the endpoint and point `x-amazon-apigateway-integration` at the Lambda logical id.
+Then update `cdk/OpenAPI_Swagger_Definition.yaml` to add the endpoint, attach the matching authorizer (`adminAuthorizer`, `instructorAuthorizer`, or `studentAuthorizer`) under `security`, and point `x-amazon-apigateway-integration` at the Lambda logical id. Also grant API Gateway permission to invoke the function (`myHandler.addPermission(...)`), following the existing handlers.
 
 Note: The project has existing handlers under `cdk/lambda/handlers/` such as `adminFunction.js`, `studentFunction.js`, and `instructorFunction.js` which can serve as examples for patterns to follow.
 
@@ -337,35 +297,43 @@ Note: The project has existing handlers under `cdk/lambda/handlers/` such as `ad
 
 For example, to alter the interview assistant page, modify `frontend/src/pages/Case/InterviewAssistant.tsx`.
 
-After making the required changes in the fork created in the [Deployment Guide](./docs/deploymentGuide.md), commit and push those changes to the branch connected to Amplify. Once the changes are pushed, the Amplify deployment should automatically redeploy.
+After making the required changes in the fork created in the [Deployment Guide](./deploymentGuide.md), commit and push those changes to the branch connected to Amplify. Once the changes are pushed, the Amplify deployment should automatically redeploy.
 
 ## Modifying the LLM
 
 - **Change the active model**:
 
-  - To change the currently active model between the options already available in the application, use the admin "AI Settings" page. See the [User Guide](./userGuide.md) for the admin UI workflow.
+  - To change the currently active model between the options already available in the application, use the admin **Settings** page (**General Configs** tab). See the [User Guide](./userGuide.md) for the admin UI workflow.
 
 - **Change the available models**:
 
-  - To change which model options are available in the admin UI, you will need to modify the codebase and redeploy.
+  - The model options shown in the admin UI come from the `defaultBedrockModelOptions` array in `cdk/lib/api-stack.ts`. CDK writes it to the SSM parameter `/<StackPrefix>-ApiStack/LAIGO/BedrockModelOptions`, which `GET /admin/ai_config` returns. Each entry has a `label`, a `value` (model ID or inference profile ARN), and `constraints` (`maxOutputTokens`, `defaultMaxOutputTokens`, `temperatureRange`, `topPRange`) that the admin API and the prompt playground enforce.
+  - Add or edit an entry there and redeploy. `frontend/src/components/Admin/ModelConfig.tsx` has a `FALLBACK_MODEL_OPTIONS` list that is only used when the API returns no options; keep it in sync if you rely on it.
+  - The backend Lambdas build Bedrock request bodies for Anthropic and Meta models only. A model from another provider also needs request/response handling in the Python Lambdas.
   - Update the allowed Bedrock model permissions in `cdk/lib/api-stack.ts` so the application can invoke the model.
-  - Update the frontend admin model option list so the model appears in the "AI Settings" page.
   - A list of the available Bedrock models and their IDs is listed [here](https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html).
-  - The `bedrockPolicyStatement` currently allows both foundation models and cross-region inference profiles:
+  - The `bedrockPolicyStatement` currently allows Anthropic and Meta foundation models and their `us.` cross-region inference profiles:
 
   ```typescript
   const bedrockPolicyStatement = new iam.PolicyStatement({
     effect: iam.Effect.ALLOW,
     actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
     resources: [
-      `arn:aws:bedrock:${this.region}::foundation-model/*`,
-      `arn:aws:bedrock:*::inference-profile/*`,
+      `arn:aws:bedrock:${this.region}::foundation-model/anthropic.*`,
+      `arn:aws:bedrock:${this.region}::foundation-model/meta.*`,
+      `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.*`,
+      `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.meta.*`,
+      // A "us." inference profile routes to foundation models in these regions
+      ...["us-east-1", "us-east-2", "us-west-2"].flatMap((r) => [
+        `arn:aws:bedrock:${r}::foundation-model/anthropic.*`,
+        `arn:aws:bedrock:${r}::foundation-model/meta.*`,
+      ]),
     ],
   });
   ```
 
   - **Foundation models** (e.g., `meta.llama3-70b-instruct-v1:0`) use the `foundation-model` ARN pattern.
-  - **Cross-region inference profiles** (e.g., `us.anthropic.claude-sonnet-5-5`) use the `inference-profile` ARN pattern and allow Bedrock to route requests across regions for improved availability.
+  - **Cross-region inference profiles** (e.g., `us.anthropic.claude-sonnet-5-5`) use the `inference-profile` ARN pattern and allow Bedrock to route requests across regions for improved availability. Invoking a profile also requires permission on the foundation models in every region the profile routes to.
 
   - After making these changes, redeploy the application by using the `cdk deploy` command in the deployment guide.
 
@@ -375,5 +343,5 @@ After making the required changes in the fork created in the [Deployment Guide](
     - `cdk/lambda/playground_generation/src/helpers/chat.py`
     - `cdk/lambda/*/src/main.py` entrypoints where model/config parameters are consumed.
 
-  - **Reasoning and assessment prompts** are managed from the admin "AI Settings" page and stored in RDS (for example in `prompt_versions`). Update these through the UI.
-  - **Summary-generation prompts** are currently hardcoded in the summary Lambda and are not currently exposed in the admin UI. Update these in `cdk/lambda/summary_generation/src/helpers/chat.py`.
+  - **Reasoning, assessment, and summary prompts** (including the full-case synthesis prompt) are managed from the admin **Settings** page and stored in the `prompt_versions` table. Update these through the UI. Default versions are seeded by migration `004_seed_default_system_prompts.js`.
+  - The legal disclaimer appended to every summary is hardcoded as `DISCLAIMER` in `cdk/lambda/summary_generation/src/main.py`.
