@@ -171,7 +171,8 @@ async function handleRestApiRequest(event) {
 
   switch (pathData) {
     case "GET /student/notifications":
-      return await getNotifications(userId, queryStringParameters, event);
+      // API Gateway sends null, not undefined, when there is no query string.
+      return await getNotifications(userId, queryStringParameters || {}, event);
 
     case "PUT /student/notifications/{notificationId}/read":
       return await markNotificationAsRead(
