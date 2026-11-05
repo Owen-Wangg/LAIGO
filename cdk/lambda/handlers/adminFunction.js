@@ -961,6 +961,15 @@ const routes = {
             WHERE prompt_version_id = ${prompt_version_id};
           `;
 
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.delete",
+        subjectType: "prompt_version",
+        subjectId: prompt_version_id,
+        before: { category, block_type, is_active },
+      });
+
       response.body = JSON.stringify({
         message: "Prompt deleted successfully",
         category,
@@ -1928,6 +1937,9 @@ const routes = {
       }
     }
     try {
+      const previousLabels = await sqlConnection`
+        SELECT role_key, singular_label, plural_label FROM role_labels
+      `;
       for (const key of validKeys) {
         const { singular, plural } = body[key];
         await sqlConnection`
@@ -1940,6 +1952,29 @@ const routes = {
                 updated_at     = now()
         `;
       }
+
+      const toLabelState = (rows) =>
+        Object.fromEntries(
+          rows.map((r) => [
+            r.role_key,
+            { singular: r.singular_label, plural: r.plural_label },
+          ]),
+        );
+      await recordAudit(sqlConnection, {
+        actorId: user_id,
+        actorEmail: env.user?.email,
+        action: "role_labels.update",
+        subjectType: "role_labels",
+        before: toLabelState(previousLabels),
+        after: toLabelState(
+          validKeys.map((key) => ({
+            role_key: key,
+            singular_label: body[key].singular.trim(),
+            plural_label: body[key].plural.trim(),
+          })),
+        ),
+      });
+
       response.statusCode = 200;
       response.body = JSON.stringify({ message: "Role labels updated successfully" });
     } catch (err) {
