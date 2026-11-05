@@ -262,68 +262,80 @@ exports.handler = async (event) => {
         "No identity-matched user row and email is unverified; skipping profile creation",
       );
     } else {
-      // Determine the role for the new user
-      let defaultRole;
+      // Resolve the role this user gets when they are not the first user.
+      // Any inability to determine the mode or the whitelist role resolves to
+      // the least-privileged role so an error path can never grant more than
+      // student access. Done before the transaction so no lock is held during
+      // the SSM and DynamoDB calls.
+      let signupRole;
+      const signupMode = await getSignupMode();
+      logger.info("New user signup", { signupMode });
 
-      // Check if this is the first user — always gets admin regardless of mode
-      const userCount = await sqlConnection`
-        SELECT COUNT(*) as count FROM "users";
-      `;
-      const isFirstUser = parseInt(userCount[0].count, 10) === 0;
+      if (signupMode === "whitelist") {
+        // Look up the canonical role from the DynamoDB whitelist
+        const whitelistRole = await getWhitelistRole(normalizedEmail);
+        if (whitelistRole) {
+          signupRole = whitelistRole;
+        } else {
+          // Whitelist check in preSignup should have blocked this; default to
+          // the least-privileged role if the role cannot be determined here.
+          logger.warn(
+            "Whitelist role could not be determined, defaulting to student",
+          );
+          signupRole = "student";
+        }
+      } else {
+        // Public mode (and the fail-closed default): least-privileged role.
+        signupRole = "student";
+      }
+
+      // The first user always gets admin regardless of mode. The empty-table
+      // check and the insert run in one transaction under an advisory lock so
+      // concurrent confirmations are serialized and only one can see an empty
+      // users table.
+      const { defaultRole, isFirstUser } = await sqlConnection.begin(
+        async (sql) => {
+          await sql`SELECT pg_advisory_xact_lock(hashtext('users_first_signup'));`;
+
+          const userCount = await sql`
+            SELECT COUNT(*) as count FROM "users";
+          `;
+          const firstUser = parseInt(userCount[0].count, 10) === 0;
+          const role = firstUser ? "admin" : signupRole;
+
+          logger.info("Creating new user in database", {
+            role,
+            isFirstUser: firstUser,
+          });
+
+          // Create new user with the determined role
+          await sql`
+            INSERT INTO "users" (idp_id, user_email, first_name, last_name, time_account_created, roles, last_sign_in)
+            VALUES (${idpId}, ${normalizedEmail}, ${firstName}, ${lastName}, CURRENT_TIMESTAMP, ARRAY[${role}]::user_role[], CURRENT_TIMESTAMP)
+            RETURNING *;
+          `;
+
+          return { defaultRole: role, isFirstUser: firstUser };
+        },
+      );
 
       if (isFirstUser) {
-        defaultRole = "admin";
-        logger.info("First user in system, assigning admin role");
+        logger.info("First user in system, assigned admin role");
         await recordSignupAudit({
           action: "user_role.bootstrap_admin",
           subjectEmail: normalizedEmail,
           after: { roles: ["admin"] },
         });
-      } else {
-        // Check signup mode to determine role. Any inability to determine the
-        // mode or the whitelist role resolves to the least-privileged role so
-        // an error path can never grant more than student access.
-        const signupMode = await getSignupMode();
-        logger.info("New user signup", { signupMode });
-
-        if (signupMode === "whitelist") {
-          // Look up the canonical role from the DynamoDB whitelist
-          const whitelistRole = await getWhitelistRole(normalizedEmail);
-          if (whitelistRole) {
-            defaultRole = whitelistRole;
-            logger.info("Assigning role from whitelist", { defaultRole });
-            if (defaultRole === "admin") {
-              await recordSignupAudit({
-                action: "user_role.signup_whitelist_admin",
-                subjectEmail: normalizedEmail,
-                after: { roles: ["admin"] },
-              });
-            }
-          } else {
-            // Whitelist check in preSignup should have blocked this; default to
-            // the least-privileged role if the role cannot be determined here.
-            logger.warn(
-              "Whitelist role could not be determined, defaulting to student",
-            );
-            defaultRole = "student";
-          }
-        } else {
-          // Public mode (and the fail-closed default): least-privileged role.
-          defaultRole = "student";
-        }
+      } else if (defaultRole === "admin") {
+        logger.info("Assigned role from whitelist", { defaultRole });
+        await recordSignupAudit({
+          action: "user_role.signup_whitelist_admin",
+          subjectEmail: normalizedEmail,
+          after: { roles: ["admin"] },
+        });
+      } else if (signupMode === "whitelist") {
+        logger.info("Assigned role from whitelist", { defaultRole });
       }
-
-      logger.info("Creating new user in database", {
-        role: defaultRole,
-        isFirstUser,
-      });
-
-      // Create new user with the determined role
-      await sqlConnection`
-        INSERT INTO "users" (idp_id, user_email, first_name, last_name, time_account_created, roles, last_sign_in)
-        VALUES (${idpId}, ${normalizedEmail}, ${firstName}, ${lastName}, CURRENT_TIMESTAMP, ARRAY[${defaultRole}]::user_role[], CURRENT_TIMESTAMP)
-        RETURNING *;
-      `;
 
       logger.info("New user created", { role: defaultRole });
     }
