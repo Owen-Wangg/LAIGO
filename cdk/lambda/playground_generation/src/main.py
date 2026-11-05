@@ -12,6 +12,30 @@ from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 # Set up logging for the Lambda function
 logger = Logger(service="PlaygroundGeneration")
 
+
+def summarize_guardrail_assessment(guard_response):
+    """Return a redacted summary of a guardrail response for logging.
+
+    The raw guardrail response echoes the flagged input (privileged PII / case
+    content), so it must never be logged verbatim. This extracts only the
+    non-sensitive signal: the top-level action and which policy types fired.
+    """
+    policy_types = set()
+    for assessment in (guard_response or {}).get("assessments", []):
+        for policy_key in (
+            "topicPolicy",
+            "contentPolicy",
+            "sensitiveInformationPolicy",
+            "wordPolicy",
+            "contextualGroundingPolicy",
+        ):
+            if policy_key in assessment:
+                policy_types.add(policy_key)
+    return {
+        "action": (guard_response or {}).get("action"),
+        "triggeredPolicies": sorted(policy_types),
+    }
+
 # Environment variables
 DB_SECRET_NAME = os.environ["SM_DB_CREDENTIALS"]
 REGION = os.environ["REGION"]
@@ -316,7 +340,10 @@ def handler(event, context):
             )
             
             if guard_response.get("action") == "GUARDRAIL_INTERVENED":
-                logger.info(f"Guardrail blocked playground input: {guard_response}")
+                logger.info(
+                    "Guardrail blocked playground input",
+                    guardrail=summarize_guardrail_assessment(guard_response),
+                )
                 
                 # Determine error message based on guardrail assessment
                 error_message = "Sorry, I cannot process your request."
