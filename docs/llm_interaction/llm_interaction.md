@@ -306,7 +306,7 @@ Evaluates a student's progress within a specific interview block by analyzing th
     - Supports both the main conversation table and the playground table
 
 - `retrieve_dynamodb_history(table_name, session_id)`:
-    - Alternative history retrieval that formats messages with role labels and timestamps
+    - Returns the stored messages as an ordered list of `{"role", "content"}` entries, taking each role from the stored message type rather than from the message text
 
 - `mark_block_completed(case_id, block_type)`:
     - Adds the block type to the `completed_blocks` array in the `cases` table when progress reaches 5/5
