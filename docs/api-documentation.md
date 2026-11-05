@@ -40,6 +40,8 @@ The API uses role-based access control (RBAC) with three authorization levels. E
 - **Instructor**: User must have `instructor` role in database to access `/instructor/*` endpoints
 - **Student**: User must have `student` role in database to access `/student/*` endpoints (with some shared endpoint exceptions)
 
+**Health checks:** `GET /admin/health`, `GET /instructor/health`, and `GET /student/health` are API Gateway mock integrations behind the matching authorizer. They return `{"status": "ok", "role": "<role>"}` and are useful for checking that a token passes a given authorizer.
+
 **Important:** Users must explicitly have the role attached to access endpoints. Having an `admin` role does NOT automatically grant access to `/instructor/*` or `/student/*` endpoints - the user must also have those specific roles in their database record.
 
 ## Base URL
@@ -93,6 +95,17 @@ Student endpoints require the user to have the `student` role in the database. T
 - `GET /student/role_labels`
 - `GET /student/get_disclaimer`
 - `POST /student/accept_disclaimer`
+
+**Instructor case-view endpoints:** These are also open to users with the `instructor` role so supervisors can view case details. The handlers still check that the instructor is assigned to the case owner.
+- `GET /student/case_page`
+- `GET /student/get_transcriptions`
+- `GET /student/transcription`
+- `GET /student/get_summaries`
+- `GET /student/feedback`
+- `GET /student/get_messages`
+- `GET /student/file_size_limit`
+
+AI endpoints (`new_case`, `text_generation`, `assess_progress`, `generate_summary`) return `403` with `"code": "DISCLAIMER_NOT_ACCEPTED"` until the user accepts the active disclaimer, and each request counts toward the daily message limit.
 
 ## Case Management
 
@@ -363,7 +376,7 @@ Get all cases for the authenticated student with server-side pagination, search,
 
 **Query Parameters:**
 - `page` (integer, optional): Page number for pagination, 0-indexed (default: 0)
-- `limit` (integer, optional): Number of cases per page (default: 12)
+- `limit` (integer, optional): Number of cases per page (default: 10, max: 100)
 - `search` (string, optional): Search term for case title, jurisdiction, or case ID
 - `status` (string, optional): Filter by case status (`in_progress`, `submitted`, `reviewed`, `archived`)
 
@@ -386,7 +399,7 @@ Get all cases for the authenticated student with server-side pagination, search,
 
 **Example (cURL):**
 ```bash
-curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/get_cases?page=0&limit=12&search=employment&status=in_progress" \
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/get_cases?page=0&limit=10&search=employment&status=in_progress" \
   -H "Authorization: eyJraWQiOiJ..."
 ```
 
@@ -751,6 +764,56 @@ curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/get
   -H "Authorization: eyJraWQiOiJ..."
 ```
 
+---
+
+### Get Transcription Text
+
+Get the transcribed text of one audio file. Available to the case owner and to instructors of the case owner.
+
+**Endpoint:** `GET /student/transcription`
+
+**Query Parameters:**
+- `audio_file_id` (string, required): The audio file ID
+
+**Response:**
+```json
+{
+  "audio_text": "Client: I was dismissed without notice..."
+}
+```
+
+**Errors:** `400` if `audio_file_id` is missing, `403` if the caller cannot access the file, `404` if it does not exist.
+
+**Example (cURL):**
+```bash
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/transcription?audio_file_id=uuid" \
+  -H "Authorization: eyJraWQiOiJ..."
+```
+
+---
+
+### Delete Transcription
+
+Delete an audio file record and its transcription. Only the case owner can delete it.
+
+**Endpoint:** `DELETE /student/delete_transcription`
+
+**Query Parameters:**
+- `audio_file_id` (string, required): The audio file ID
+
+**Response:**
+```json
+{
+  "message": "Transcription deleted successfully"
+}
+```
+
+**Example (cURL):**
+```bash
+curl -X DELETE "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/delete_transcription?audio_file_id=uuid" \
+  -H "Authorization: eyJraWQiOiJ..."
+```
+
 ## User Settings
 
 ### Get Assigned Instructors
@@ -808,7 +871,7 @@ curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/get
 
 Mark the disclaimer as accepted by the user.
 
-**Endpoint:** `PUT /student/accept_disclaimer`
+**Endpoint:** `POST /student/accept_disclaimer`
 
 **Query Parameters:** None
 
@@ -818,7 +881,7 @@ Mark the disclaimer as accepted by the user.
 
 **Example (cURL):**
 ```bash
-curl -X PUT "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/accept_disclaimer" \
+curl -X POST "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/accept_disclaimer" \
   -H "Authorization: eyJraWQiOiJ..."
 ```
 ---
@@ -872,22 +935,145 @@ Get configurable role display labels.
 }
 ```
 
----
-
-
----
-
-
-# Instructor Endpoints
-
-Instructor endpoints require the user to have the `instructor` role in the database. The instructor authorizer validates this role before allowing access to any `/instructor/*` endpoint.
-
-
 **Example (cURL):**
 ```bash
 curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/role_labels" \
   -H "Authorization: eyJraWQiOiJ..."
 ```
+
+---
+
+### Get Case Types
+
+Get the case types that can be selected when creating a case. Administrators manage this list in the Terminology settings.
+
+**Endpoint:** `GET /student/case_types`
+
+**Query Parameters:** None
+
+**Response:**
+```json
+{
+  "case_types": ["Criminal Law", "Civil Law", "Family Law", "Other"]
+}
+```
+
+If the list is unset or unreadable, the response is `{"case_types": ["Other"]}`.
+
+**Example (cURL):**
+```bash
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/case_types" \
+  -H "Authorization: eyJraWQiOiJ..."
+```
+
+---
+
+### Get Profile
+
+Get the authenticated user's database profile. The frontend calls this on sign-in to resolve roles. Available to any authenticated user.
+
+**Endpoint:** `GET /student/profile`
+
+**Query Parameters:** None
+
+**Response:** user profile including `userId`, `email`, `firstName`, `lastName`, and `roles`. If the user has no database record, the authorizer denies the request with `403`.
+
+**Example (cURL):**
+```bash
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/profile" \
+  -H "Authorization: eyJraWQiOiJ..."
+```
+
+## Notifications
+
+Notification endpoints are served by the notification service Lambda and only act on the caller's own notifications. New notifications are also pushed in real time over the WebSocket API.
+
+### List Notifications
+
+**Endpoint:** `GET /student/notifications`
+
+**Query Parameters:**
+- `limit` (integer, optional): Page size (default: 20, max: 100)
+- `lastKey` (string, optional): The `nextKey` value from the previous page
+
+**Response:**
+```json
+{
+  "notifications": [
+    {
+      "notificationId": "notif_1705315800000_ab12cd",
+      "userId": "uuid",
+      "type": "feedback",
+      "title": "New feedback",
+      "message": "Your supervisor left feedback on Employment Dispute",
+      "metadata": { "caseId": "uuid" },
+      "isRead": false,
+      "readStatus": "UNREAD",
+      "createdAt": "2024-01-15T10:30:00.000Z"
+    }
+  ],
+  "hasMore": true,
+  "nextKey": "eyJQSyI6..."
+}
+```
+
+Notifications are returned newest first. `nextKey` is only present when `hasMore` is `true`. `type` is one of `feedback`, `summary_complete`, `transcript_complete`, or `case_submission`. Notifications expire after 30 days.
+
+---
+
+### Get Unread Count
+
+**Endpoint:** `GET /student/notifications/unread-count`
+
+**Response:**
+```json
+{
+  "count": 3
+}
+```
+
+---
+
+### Mark Notification as Read / Unread
+
+**Endpoints:**
+- `PUT /student/notifications/{notificationId}/read`
+- `PUT /student/notifications/{notificationId}/unread`
+
+**Response:** `{"success": true}`, or `404` if the notification does not exist or belongs to another user.
+
+---
+
+### Mark All Notifications as Read
+
+**Endpoint:** `PUT /student/notifications/read-all`
+
+**Response:**
+```json
+{
+  "updated": 5
+}
+```
+
+---
+
+### Delete Notification
+
+**Endpoint:** `DELETE /student/notifications/{notificationId}`
+
+**Response:** `{"success": true}`, or `404` if the notification does not exist or belongs to another user.
+
+**Example (cURL):**
+```bash
+curl -X DELETE "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/notifications/notif_1705315800000_ab12cd" \
+  -H "Authorization: eyJraWQiOiJ..."
+```
+
+---
+
+# Instructor Endpoints
+
+Instructor endpoints require the user to have the `instructor` role in the database. The instructor authorizer validates this role before allowing access to any `/instructor/*` endpoint.
 
 ## Student Management
 
@@ -899,7 +1085,7 @@ Get all cases for students assigned to the instructor with server-side paginatio
 
 **Query Parameters:**
 - `page` (integer, optional): Page number for pagination, 0-indexed (default: 0)
-- `limit` (integer, optional): Number of cases per page (default: 12)
+- `limit` (integer, optional): Number of cases per page (default: 10, max: 100)
 - `search` (string, optional): Search term for case title, student name, jurisdiction, or case ID
 - `status` (string, optional): Filter by case status (`in_progress`, `submitted`, `reviewed`, `archived`)
 
@@ -924,7 +1110,7 @@ Get all cases for students assigned to the instructor with server-side paginatio
 
 **Example (cURL):**
 ```bash
-curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/instructor/view_students?page=0&limit=12&search=john&status=submitted" \
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/instructor/view_students?page=0&limit=10&search=john&status=submitted" \
   -H "Authorization: eyJraWQiOiJ..."
 ```
 
@@ -1105,18 +1291,78 @@ Unarchive a student's case.
 }
 ```
 
----
-
-# Admin Endpoints
-
-Admin endpoints require the user to have the `admin` role in the database. The admin authorizer validates this role before allowing access to any `/admin/*` endpoint.
-
-
 **Example (cURL):**
 ```bash
 curl -X PUT "https://api-id.execute-api.us-east-1.amazonaws.com/prod/instructor/unarchive_case?case_id=uuid" \
   -H "Authorization: eyJraWQiOiJ..."
 ```
+
+---
+
+### Delete Case
+
+Delete a case owned by the instructor or by one of the instructor's assigned students. The case's AI chat history is deleted from DynamoDB, and related database rows (summaries, audio files, feedback, reviewer assignments) are removed by cascade.
+
+**Endpoint:** `DELETE /instructor/delete_case`
+
+**Query Parameters:**
+- `case_id` (string, required): The ID of the case to delete
+
+**Response:**
+```json
+{
+  "message": "Case deleted successfully"
+}
+```
+
+**Errors:** `400` if `case_id` is missing, `403` if the instructor cannot access the case, `404` if the case does not exist.
+
+**Example (cURL):**
+```bash
+curl -X DELETE "https://api-id.execute-api.us-east-1.amazonaws.com/prod/instructor/delete_case?case_id=uuid" \
+  -H "Authorization: eyJraWQiOiJ..."
+```
+
+## Prompts
+
+### Get Active Prompts
+
+Get the currently active prompt versions (read-only view for instructors).
+
+**Endpoint:** `GET /instructor/prompts`
+
+**Query Parameters:**
+- `category` (string, optional): `reasoning`, `assessment`, or `summary`
+- `block_type` (string, optional): `intake`, `legal_analysis`, `contrarian`, or `policy`
+- `prompt_scope` (string, optional): `block` or `full_case`
+
+**Response:**
+```json
+[
+  {
+    "prompt_version_id": "uuid",
+    "category": "reasoning",
+    "block_type": "intake",
+    "prompt_scope": "block",
+    "version_number": 2,
+    "version_name": "Intake v2",
+    "prompt_text": "You are a legal reasoning assistant...",
+    "time_created": "2024-01-15T10:30:00.000Z"
+  }
+]
+```
+
+**Example (cURL):**
+```bash
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/instructor/prompts?category=reasoning" \
+  -H "Authorization: eyJraWQiOiJ..."
+```
+
+---
+
+# Admin Endpoints
+
+Admin endpoints require the user to have the `admin` role in the database. The admin authorizer validates this role before allowing access to any `/admin/*` endpoint.
 
 ## User Management
 
@@ -1152,6 +1398,32 @@ curl -X PUT "https://api-id.execute-api.us-east-1.amazonaws.com/prod/admin/user_
   "operation": "add",
   "role": "instructor"
 }'
+```
+---
+
+### Elevate User to Instructor
+
+Replace an existing user's `student` role with `instructor`. The user must already exist in the database.
+
+**Endpoint:** `POST /admin/elevate_instructor`
+
+**Query Parameters:**
+- `email` (string, required): The user's email address
+
+**Response:**
+```json
+{
+  "message": "User successfully elevated to instructor.",
+  "success": true
+}
+```
+
+If the user already has the `instructor` or `admin` role, the response is `200` with `"alreadyInstructor": true`. Returns `400` if `email` is missing and `404` if the user does not exist. The change is recorded in `audit_log`.
+
+**Example (cURL):**
+```bash
+curl -X POST "https://api-id.execute-api.us-east-1.amazonaws.com/prod/admin/elevate_instructor?email=user@example.com" \
+  -H "Authorization: eyJraWQiOiJ..."
 ```
 ---
 
@@ -1240,7 +1512,7 @@ Get a paginated list of all users with optional search and role filtering.
 
 **Query Parameters:**
 - `page` (integer, optional): Page number for pagination (default: 0)
-- `limit` (integer, optional): Number of items per page (default: 10)
+- `limit` (integer, optional): Number of items per page (default: 10, max: 100)
 - `search` (string, optional): Search term for first name, last name, or email
 - `role` (string, optional): Filter by role (`admin`, `instructor`, `student`, or `all`)
 
@@ -1582,11 +1854,11 @@ Retrieve current AI model configuration parameters.
 **Response:**
 ```json
 {
-  "bedrock_llm_id": "meta.llama3-70b-instruct-v1:0",
+  "bedrock_llm_id": "arn:aws:bedrock:us-west-2:123456789012:inference-profile/us.anthropic.claude-sonnet-5-5",
   "model_options": [
     {
       "label": "Claude Sonnet 5.5",
-      "value": "us.anthropic.claude-sonnet-5-5",
+      "value": "arn:aws:bedrock:us-west-2:123456789012:inference-profile/us.anthropic.claude-sonnet-5-5",
       "constraints": {
         "maxOutputTokens": 128000,
         "defaultMaxOutputTokens": 4096,
@@ -1605,13 +1877,16 @@ Retrieve current AI model configuration parameters.
       }
     }
   ],
-  "temperature": "0.7",
+  "temperature": "0.5",
   "top_p": "0.9",
   "max_tokens": "2048",
   "message_limit": "50",
-  "file_size_limit": "500"
+  "file_size_limit": "500",
+  "case_types": ["Criminal Law", "Civil Law", "Family Law", "Other"]
 }
 ```
+
+The values shown for `temperature`, `top_p`, `max_tokens`, `message_limit`, and `file_size_limit` are the deployment defaults.
 
 **Example (cURL):**
 ```bash
@@ -1645,7 +1920,8 @@ Update AI model configuration parameters.
 - `top_p` (number, optional): Controls diversity (0.0 to 1.0)
 - `max_tokens` (integer, optional): Maximum tokens in response (minimum: 1)
 - `message_limit` (string, optional): Daily message limit per user (>= 10 or "Infinity")
-- `file_size_limit` (string, optional): Max audio file size in MB (1-500)
+- `file_size_limit` (string, optional): Max audio file size in MB (positive integer)
+- `case_types` (array of strings, optional): Allowed case types; must be a non-empty array of unique, non-empty strings
 
 **Validation note:** If `bedrock_llm_id` is provided, it must match one of the configured model options. If `temperature`, `top_p`, or `max_tokens` are provided, they are validated against the selected model's `constraints`.
 
@@ -1760,7 +2036,7 @@ Update the audio file size limit.
 ```
 
 **Parameters:**
-- `value` (string, required): File size limit in MB (1-500)
+- `value` (string, required): File size limit in MB (positive integer)
 
 **Response:** `200 OK`
 
@@ -2452,10 +2728,16 @@ The API implements rate limiting at multiple levels:
 
 ---
 
+### API Gateway Throttling
+
+- Stage-level throttling: 100 requests per second, burst of 200
+
+---
+
 ### Application Rate Limiting
 
 - **Daily Message Limit**: Configurable per-user daily message limit (default: 50 messages)
-  - Applies to AI chat interactions
+  - Applies to every AI request: chat messages, case creation (title generation), progress assessments, summaries, and playground requests
   - Returns `429 Too Many Requests` when exceeded
   - Resets daily at midnight UTC
 
@@ -2466,25 +2748,24 @@ The API implements rate limiting at multiple levels:
 - Implement exponential backoff for retries
 - Cache responses when appropriate
 - Use WebSocket for real-time streaming instead of polling
-- Monitor rate limit headers in responses
 
 ## Security Considerations
 
 ### Token Management
 
-- ID tokens expire after 1 hour
+- ID and access tokens expire after 30 minutes
+- Refresh tokens expire after 7 days; token revocation is enabled
 - Use refresh tokens to obtain new ID tokens
 - Never expose tokens in logs or client-side code
-- Store tokens securely (use AWS Amplify for automatic secure storage)
+- The frontend stores Amplify tokens in `sessionStorage`, so they are cleared when the tab closes
 
 ---
 
 ### CORS
 
-All endpoints support CORS with the following headers:
-- `Access-Control-Allow-Origin: *`
+`Access-Control-Allow-Origin` is set to the single configured frontend origin: `https://<DomainName>` or `FrontendOrigin` when provided at deploy time, otherwise `http://localhost:5173`. Responses also include:
 - `Access-Control-Allow-Methods: *`
-- `Access-Control-Allow-Headers: Content-Type,X-Amz-Date,Authorization,X-Api-Key`
+- `Access-Control-Allow-Headers: Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token`
 
 ---
 
@@ -2500,14 +2781,24 @@ All responses include security headers:
 
 ### Input Validation
 
-- All request bodies are validated against schemas
-- Query parameters are type-checked
-- File uploads are validated for size and type
-- PII detection via AWS Bedrock Guardrails
+- Request bodies and query parameters are validated in the Lambda handlers (required fields, enum values, numeric bounds)
+- Object access is checked against case ownership or the instructor-student relationship (BOLA/IDOR protection)
+- Audio uploads are limited by the configurable file size limit
+- User input to the AI functions passes through Bedrock Guardrails (PII and prompt-attack filters) and prompt-input sanitizing
 
 ## WebSocket API
 
-For real-time streaming AI responses, notifications, and bidirectional communication, use the WebSocket API. See the [WebSocket Implementation Guide](.kiro/steering/Websocket.md) for detailed documentation.
+For real-time streaming AI responses, notifications, and bidirectional communication, use the WebSocket API. The handlers live in `cdk/lambda/websocket/`, and the client hook is `frontend/src/hooks/useWebSocket.ts`.
+
+**Connecting:** pass the Cognito ID token as the `token` query parameter (or in the `Sec-WebSocket-Protocol` or `Authorization` header). The WebSocket authorizer resolves the user from the database. Each user may hold at most 5 concurrent connections.
+
+**Actions** (sent as `{"action": "<name>", ...}`):
+- `ping`
+- `generate_text` (interview assistant chat)
+- `assess_progress`
+- `generate_summary`
+- `audio_to_text`
+- `playground_test` and `playground_assess` (admin and instructor only)
 
 **WebSocket URL:**
 ```
@@ -2532,7 +2823,7 @@ wss://{websocket-api-id}.execute-api.{region}.amazonaws.com/prod
 
 **Solution:**
 - Verify token is included in `Authorization` header
-- Check token hasn't expired (1 hour lifetime)
+- Check token hasn't expired (30 minute lifetime)
 - Refresh token using AWS Amplify
 
 ```javascript
@@ -2639,11 +2930,10 @@ const isTokenExpired = (token) => {
 
 ## Related Documentation
 
-- [Product Overview](.kiro/steering/product.md) - Core features and user roles
-- [Technology Stack](.kiro/steering/tech.md) - AWS services and frameworks
-- [Authentication & Authorization](.kiro/steering/Authentication.md) - Cognito integration and RBAC
-- [WebSocket Implementation](.kiro/steering/Websocket.md) - Real-time streaming and notifications
-- [Project Structure](.kiro/steering/structure.md) - File organization and naming conventions
+- [Architecture Deep Dive](./architectureDeepDive.md) - Components and database schema
+- [Security Guide](./securityGuide.md) - Authentication, authorizers, WAF, and WebSocket security
+- [LLM Interaction Overview](./llm_interaction/llm_interaction.md) - AI Lambda functions and prompts
+- [OpenAPI definition](../cdk/OpenAPI_Swagger_Definition.yaml) - The deployed REST API specification (source of truth for routes)
 
 ## API Changelog
 
@@ -2717,6 +3007,6 @@ async function apiRequest(url, options) {
 
 ---
 
-**Last Updated:** March 2024  
+**Last Updated:** November 2026  
 **API Version:** 1.0.0  
 **Base URL:** `https://{api-id}.execute-api.{region}.amazonaws.com/prod`

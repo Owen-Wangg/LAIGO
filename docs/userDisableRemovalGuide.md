@@ -16,8 +16,9 @@ Choose only one workflow based on your goal.
   - Amazon SageMaker AI permissions (to create a notebook instance in the VPC)
   - Amazon Cognito permissions (to delete users from the User Pool)
   - AWS Secrets Manager permissions (to retrieve database credentials from the console)
+  - Amazon DynamoDB permissions (to delete the user's chat history, notifications, and whitelist entry)
 
-- The user's email address or `cognito_id` (UUID)
+- The user's email address or `idp_id` (the Cognito `sub`, a UUID)
 
 ## Overview
 
@@ -27,12 +28,13 @@ Choose only one workflow based on your goal.
 
 - **Workflow B (Full removal)**
   - Best for: permanent account removal and data cleanup
-  - Result: user data is deleted from PostgreSQL and user is deleted from Cognito
+  - Result: user data is deleted from PostgreSQL and DynamoDB, and the user is deleted from Cognito
 
-For full removal, user data lives in two places and both must be cleaned:
+For full removal, user data lives in three places and all must be cleaned:
 
 1. **PostgreSQL (RDS)** — the `users` table and all related records across multiple tables
-2. **AWS Cognito** — the user's authentication identity and group membership
+2. **Amazon DynamoDB** — AI chat history for the user's cases, notifications, and the signup whitelist entry
+3. **AWS Cognito** — the user's authentication identity
 
 ---
 
@@ -41,7 +43,7 @@ For full removal, user data lives in two places and both must be cleaned:
 Use this workflow when you only need to block app access.
 
 1. Open the **AWS Console** and navigate to **Amazon Cognito**
-2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-pool` or similar)
+2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-UserPool`)
 ![image](./media/select-userpool.png)
 
 3. Go to **Users** and click on the username of the desired user
@@ -116,7 +118,7 @@ import psycopg2
 
 Retrieve the credentials from the AWS Console:
 1. **RDS Proxy endpoint**: Navigate to **RDS** > **Proxies** > select your proxy > copy the **Proxy endpoint** (looks like `xxxxx-proxy.proxy-xxxxx.region.rds.amazonaws.com`)
-2. **Username and password**: Navigate to **Secrets Manager** > search for `{StackPrefix}-LAIGO/credentials/rdsDbCredential` > click **Retrieve secret value** > copy the `username` and `password`
+2. **Username and password**: Navigate to **Secrets Manager** > search for `{StackPrefix}-DatabaseStack-LAIGO/credentials/rdsDbCredential` > click **Retrieve secret value** > copy the `username` and `password`
 
 ```python
 DB_HOST = ""      # <-- Paste the RDS Proxy endpoint from RDS Proxies
@@ -171,6 +173,14 @@ if user:
 else:
     print("User not found. Check the email address.")
     USER_ID = None
+```
+
+**Cell 5b — List the user's case IDs (needed for the DynamoDB cleanup in Step 4):**
+
+```python
+cur.execute('SELECT case_id FROM cases WHERE student_id = %s;', (USER_ID,))
+CASE_IDS = [str(row[0]) for row in cur.fetchall()]
+print(f"{len(CASE_IDS)} cases: {CASE_IDS}")
 ```
 
 ---
@@ -228,6 +238,8 @@ except Exception as e:
 
 > Steps 7-9 nullify the `author_id`/`updated_by` rather than deleting the records, since prompts and disclaimers are shared system resources. If you want to delete them entirely, replace the `UPDATE` lines with `DELETE FROM` statements.
 
+> **Audit log:** `audit_log` rows that reference this user (as `actor_id`/`actor_email` or `subject_id`/`subject_email`) are not deleted by Cell 6. The table has no foreign keys to `users`, so the deletion succeeds, and the rows are kept as the audit trail. The application roles cannot modify `audit_log`; if your retention policy requires removing this user's email from it, do so with the admin credentials used in this notebook.
+
 **Cell 7 — Verify deletion:**
 
 ```python
@@ -248,10 +260,62 @@ print("Connection closed")
 
 ---
 
-### Step 4: Remove the User from Cognito
+### Step 4: Delete the User's DynamoDB Data
+
+Deleting cases in SQL does not remove their AI chat history, which is stored in DynamoDB. The notebook's IAM execution role needs `dynamodb:Query`, `dynamodb:DeleteItem`, and `dynamodb:BatchWriteItem` on the tables below (the VPC has a DynamoDB gateway endpoint, so no internet access is needed for these calls).
+
+| Table | Key | What to delete |
+| --- | --- | --- |
+| `{StackPrefix}-ApiStack-Conversation-Table` | `SessionId` = `{case_id}-{block_type}` | Chat history for each of the user's cases (retained indefinitely) |
+| `{StackPrefix}-ApiStack-notifications` | `PK` = `USER#{user_id}` | The user's notifications (expire after 30 days if left) |
+| `{StackPrefix}-ApiStack-email-whitelist` | `email` (lowercase) | The user's whitelist entry, if any |
+
+WebSocket connection records and prompt playground sessions expire on their own within a day.
+
+**Cell 9 — Delete DynamoDB data:**
+
+```python
+import boto3
+
+STACK_PREFIX = ""  # <-- CHANGE THIS (e.g. "LAIGO")
+ddb = boto3.client("dynamodb")
+api = f"{STACK_PREFIX}-ApiStack"
+
+# 1. Chat history for every case the user owned
+for case_id in CASE_IDS:
+    for block in ("intake", "legal_analysis", "contrarian", "policy"):
+        ddb.delete_item(
+            TableName=f"{api}-Conversation-Table",
+            Key={"SessionId": {"S": f"{case_id}-{block}"}},
+        )
+
+# 2. Notifications
+paginator = ddb.get_paginator("query")
+for page in paginator.paginate(
+    TableName=f"{api}-notifications",
+    KeyConditionExpression="PK = :pk",
+    ExpressionAttributeValues={":pk": {"S": f"USER#{USER_ID}"}},
+    ProjectionExpression="PK, SK",
+):
+    for item in page["Items"]:
+        ddb.delete_item(TableName=f"{api}-notifications", Key={"PK": item["PK"], "SK": item["SK"]})
+
+# 3. Whitelist entry
+ddb.delete_item(
+    TableName=f"{api}-email-whitelist",
+    Key={"email": {"S": USER_EMAIL.strip().lower()}},
+)
+print("DynamoDB cleanup complete")
+```
+
+> If the notebook role cannot be granted DynamoDB access, delete the same items from the DynamoDB console (**Explore items**, filter by the keys above).
+
+---
+
+### Step 5: Remove the User from Cognito
 
 1. Open the **AWS Console** and navigate to **Amazon Cognito**
-2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-pool` or similar)
+2. Select the LAIGO User Pool (named `{StackPrefix}-ApiStack-UserPool`)
 3. Go to **Users** and search for the user by email
 4. Select the user and click **Delete user**
 

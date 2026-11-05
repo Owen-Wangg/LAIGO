@@ -19,7 +19,7 @@
     3. An **AWS Lambda** function monitors the bucket, retrieves the audio file, and prepares it for transcription processing.
     4. **Amazon Transcribe** processes the uploaded audio file and converts it into text.
 
-5. **Data persistence** – Meta data related to the audio file and its transcription, such as timestamps and case id, alongside primary application data, including such as cases and users, is stored in an **Amazon RDS SQL Database**. An **AWS RDS Proxy** is utilized to manage a high volume of concurrent connections efficiently and improve database scalability.
+5. **Data persistence** – Metadata related to the audio file and its transcription, such as timestamps and case ID, alongside primary application data such as cases and users, is stored in an **Amazon RDS for PostgreSQL** (version 17) database. An **Amazon RDS Proxy** manages a high volume of concurrent connections and requires TLS. Chat history, notifications, WebSocket connections, prompt playground sessions, and the signup email whitelist are stored in **Amazon DynamoDB** tables.
 
 
 6. **Notifications** – **Amazon EventBridge** receives domain events and routes them to a **Notification Service Lambda**, which stores notification and connection state data in **DynamoDB**.
@@ -51,7 +51,7 @@
 | `roles`                | Array of `user_role` (`student`/`instructor`/`admin`)   |
 | `time_account_created` | Timestamp when the user's account was initially created |
 | `last_sign_in`         | Timestamp of the user's most recent login               |
-| `activity_counter`     | Count of AI messages sent by the user in the past 24h   |
+| `activity_counter`     | Count of AI requests made by the user today (resets at the UTC date boundary) |
 | `last_activity`        | Timestamp of the user's last recorded activity          |
 | `accepted_disclaimer`  | True if user has agreed to the current disclaimer       |
 | `metadata`             | JSONB field for miscellaneous user metadata             |
@@ -189,5 +189,22 @@
 | `plural_label`   | Configurable plural display label for a role (e.g., Students, Instructors) |
 | `updated_by`     | FK→`users`; user who last updated the role label pair                       |
 | `updated_at`     | Timestamp of the most recent role label update                              |
+
+##### `audit_log`
+
+Records administrative actions: role changes, instructor assignments, prompt and disclaimer changes, role label edits, AI configuration updates, signup mode changes, and whitelist changes. The table is append-only for the application database roles: `db_setup` revokes `UPDATE`, `DELETE`, and `TRUNCATE` on it from `readwrite` and `tablecreator` on every deploy.
+
+| Column          | Description                                                        |
+| --------------- | ------------------------------------------------------------------ |
+| `audit_id`      | UUID PK                                                            |
+| `actor_id`      | ID of the user who performed the action (no FK, so rows survive user deletion) |
+| `actor_email`   | Email of the acting user at the time of the action                 |
+| `action`        | Action name (for example `user_role.elevate_instructor`)           |
+| `subject_type`  | Type of the affected object (for example `user`)                   |
+| `subject_id`    | ID of the affected object                                          |
+| `subject_email` | Email of the affected user, when the subject is a user             |
+| `before_state`  | JSONB snapshot before the change                                   |
+| `after_state`   | JSONB snapshot after the change                                    |
+| `created_at`    | Timestamp of the action                                            |
 
 ---
