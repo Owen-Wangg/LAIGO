@@ -1998,6 +1998,23 @@ const routes = {
         return;
       }
     }
+    // Whitelist CSV uploads resolve each row's role from its singular label,
+    // so every singular label must map to exactly one role.
+    const seenSingular = new Map();
+    for (const key of validKeys) {
+      const normalized = body[key].singular.trim().toLowerCase();
+      const otherCanonical = validKeys.find(
+        (other) => other !== key && other === normalized,
+      );
+      if (seenSingular.has(normalized) || otherCanonical) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({
+          error: `Singular label "${body[key].singular.trim()}" is already used by another role. Each role needs a distinct singular label.`,
+        });
+        return;
+      }
+      seenSingular.set(normalized, key);
+    }
     try {
       const previousLabels = await sqlConnection`
         SELECT role_key, singular_label, plural_label FROM role_labels
@@ -2223,9 +2240,19 @@ const routes = {
         SELECT role_key, singular_label FROM role_labels;
       `;
       // Build case-insensitive lookup: "advocate" -> "student"
+      // A label shared by two roles would make the mapping depend on row
+      // order, so refuse the upload rather than guess which role was meant.
       const labelToRole = {};
       for (const row of labels) {
-        labelToRole[row.singular_label.toLowerCase()] = row.role_key;
+        const label = row.singular_label.toLowerCase().trim();
+        if (labelToRole[label] && labelToRole[label] !== row.role_key) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({
+            error: `Role label "${row.singular_label}" is assigned to more than one role. Give each role a distinct label before uploading.`,
+          });
+          return;
+        }
+        labelToRole[label] = row.role_key;
       }
       // Also accept canonical names directly
       for (const key of ["student", "instructor", "admin"]) {
