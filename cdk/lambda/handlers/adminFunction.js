@@ -68,6 +68,7 @@ const {
 } = require("@aws-sdk/client-ssm");
 
 const { evaluateRoleChange } = require("./utils/roleChange");
+const { parsePagination } = require("./utils/pagination");
 const {
   validateMessageLimit,
   validateFileSizeLimit,
@@ -251,7 +252,7 @@ const validateConfigAgainstModelConstraints = (modelId, config, modelOptions) =>
 
   if (
     config.max_tokens !== undefined &&
-    (!Number.isFinite(config.max_tokens) ||
+    (!Number.isInteger(config.max_tokens) ||
       config.max_tokens < 1 ||
       config.max_tokens > constraints.maxOutputTokens)
   ) {
@@ -262,7 +263,8 @@ const validateConfigAgainstModelConstraints = (modelId, config, modelOptions) =>
 
   if (
     config.temperature !== undefined &&
-    (config.temperature < constraints.temperatureRange[0] ||
+    (!Number.isFinite(config.temperature) ||
+      config.temperature < constraints.temperatureRange[0] ||
       config.temperature > constraints.temperatureRange[1])
   ) {
     errors.push(
@@ -272,7 +274,8 @@ const validateConfigAgainstModelConstraints = (modelId, config, modelOptions) =>
 
   if (
     config.top_p !== undefined &&
-    (config.top_p < constraints.topPRange[0] ||
+    (!Number.isFinite(config.top_p) ||
+      config.top_p < constraints.topPRange[0] ||
       config.top_p > constraints.topPRange[1])
   ) {
     errors.push(
@@ -334,6 +337,28 @@ const routes = {
         }
 
         const student = studentLookup[0];
+
+        // The roster row grants the instructor access to the student's cases,
+        // so both parties must hold the matching role.
+        if (!Array.isArray(student.roles) || !student.roles.includes("student")) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({
+            error: "The user with that email is not a student.",
+          });
+          return;
+        }
+
+        const instructorLookup = await sqlConnection`
+              SELECT roles FROM "users" WHERE user_id = ${instructor_id};
+            `;
+        const instructorRoles = instructorLookup[0]?.roles;
+        if (!Array.isArray(instructorRoles) || !instructorRoles.includes("instructor")) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({
+            error: "User is not an instructor or doesn't exist",
+          });
+          return;
+        }
 
         // Prevent self-assignment (a user with both roles assigning themselves)
         if (instructor_id === student.user_id) {
@@ -438,9 +463,7 @@ const routes = {
     const { response, sqlConnection } = env;
     try {
       const params = event.queryStringParameters || {};
-      const page = parseInt(params.page || "0", 10);
-      const limit = parseInt(params.limit || "10", 10);
-      const offset = page * limit;
+      const { limit, offset } = parsePagination(params);
       const search = params.search ? `%${params.search}%` : null;
       const role = params.role && params.role !== "all" ? params.role : null;
 
@@ -726,7 +749,8 @@ const routes = {
 
       // Check if prompt exists
       const existingPrompt = await sqlConnection`
-            SELECT prompt_version_id FROM "prompt_versions"
+            SELECT prompt_version_id, prompt_text, version_name, is_active
+            FROM "prompt_versions"
             WHERE prompt_version_id = ${prompt_version_id};
           `;
 
@@ -744,6 +768,25 @@ const routes = {
             WHERE prompt_version_id = ${prompt_version_id}
             RETURNING *;
           `;
+
+      const previousPrompt = existingPrompt[0];
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.update",
+        subjectType: "prompt_version",
+        subjectId: prompt_version_id,
+        before: {
+          prompt_text: previousPrompt.prompt_text,
+          version_name: previousPrompt.version_name,
+          is_active: previousPrompt.is_active,
+        },
+        after: {
+          prompt_text: updateResult[0].prompt_text,
+          version_name: updateResult[0].version_name,
+          is_active: updateResult[0].is_active,
+        },
+      });
 
       response.body = JSON.stringify(updateResult[0]);
     } catch (err) {
@@ -961,6 +1004,15 @@ const routes = {
             WHERE prompt_version_id = ${prompt_version_id};
           `;
 
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.delete",
+        subjectType: "prompt_version",
+        subjectId: prompt_version_id,
+        before: { category, block_type, is_active },
+      });
+
       response.body = JSON.stringify({
         message: "Prompt deleted successfully",
         category,
@@ -1142,7 +1194,7 @@ const routes = {
           ssm.send(
             new PutParameterCommand({
               Name: BEDROCK_TEMP_PARAM,
-              Value: String(body.temperature),
+              Value: String(effectiveConfig.temperature),
               Overwrite: true,
               Type: "String",
             }),
@@ -1154,7 +1206,7 @@ const routes = {
           ssm.send(
             new PutParameterCommand({
               Name: BEDROCK_TOP_P_PARAM,
-              Value: String(body.top_p),
+              Value: String(effectiveConfig.top_p),
               Overwrite: true,
               Type: "String",
             }),
@@ -1166,7 +1218,7 @@ const routes = {
           ssm.send(
             new PutParameterCommand({
               Name: BEDROCK_MAX_TOKENS_PARAM,
-              Value: String(body.max_tokens),
+              Value: String(effectiveConfig.max_tokens),
               Overwrite: true,
               Type: "String",
             }),
@@ -1485,7 +1537,8 @@ const routes = {
 
       // Check if disclaimer exists
       const existingDisclaimer = await sqlConnection`
-            SELECT disclaimer_id FROM "disclaimers"
+            SELECT disclaimer_id, disclaimer_text, version_name, is_active
+            FROM "disclaimers"
             WHERE disclaimer_id = ${disclaimer_id};
           `;
 
@@ -1504,6 +1557,25 @@ const routes = {
             WHERE disclaimer_id = ${disclaimer_id}
             RETURNING *;
           `;
+
+      const previousDisclaimer = existingDisclaimer[0];
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.update",
+        subjectType: "disclaimer",
+        subjectId: disclaimer_id,
+        before: {
+          disclaimer_text: previousDisclaimer.disclaimer_text,
+          version_name: previousDisclaimer.version_name,
+          is_active: previousDisclaimer.is_active,
+        },
+        after: {
+          disclaimer_text: updateResult[0].disclaimer_text,
+          version_name: updateResult[0].version_name,
+          is_active: updateResult[0].is_active,
+        },
+      });
 
       response.body = JSON.stringify(updateResult[0]);
     } catch (err) {
@@ -1927,7 +1999,27 @@ const routes = {
         return;
       }
     }
+    // Whitelist CSV uploads resolve each row's role from its singular label,
+    // so every singular label must map to exactly one role.
+    const seenSingular = new Map();
+    for (const key of validKeys) {
+      const normalized = body[key].singular.trim().toLowerCase();
+      const otherCanonical = validKeys.find(
+        (other) => other !== key && other === normalized,
+      );
+      if (seenSingular.has(normalized) || otherCanonical) {
+        response.statusCode = 400;
+        response.body = JSON.stringify({
+          error: `Singular label "${body[key].singular.trim()}" is already used by another role. Each role needs a distinct singular label.`,
+        });
+        return;
+      }
+      seenSingular.set(normalized, key);
+    }
     try {
+      const previousLabels = await sqlConnection`
+        SELECT role_key, singular_label, plural_label FROM role_labels
+      `;
       for (const key of validKeys) {
         const { singular, plural } = body[key];
         await sqlConnection`
@@ -1940,6 +2032,29 @@ const routes = {
                 updated_at     = now()
         `;
       }
+
+      const toLabelState = (rows) =>
+        Object.fromEntries(
+          rows.map((r) => [
+            r.role_key,
+            { singular: r.singular_label, plural: r.plural_label },
+          ]),
+        );
+      await recordAudit(sqlConnection, {
+        actorId: user_id,
+        actorEmail: env.user?.email,
+        action: "role_labels.update",
+        subjectType: "role_labels",
+        before: toLabelState(previousLabels),
+        after: toLabelState(
+          validKeys.map((key) => ({
+            role_key: key,
+            singular_label: body[key].singular.trim(),
+            plural_label: body[key].plural.trim(),
+          })),
+        ),
+      });
+
       response.statusCode = 200;
       response.body = JSON.stringify({ message: "Role labels updated successfully" });
     } catch (err) {
@@ -2126,9 +2241,19 @@ const routes = {
         SELECT role_key, singular_label FROM role_labels;
       `;
       // Build case-insensitive lookup: "advocate" -> "student"
+      // A label shared by two roles would make the mapping depend on row
+      // order, so refuse the upload rather than guess which role was meant.
       const labelToRole = {};
       for (const row of labels) {
-        labelToRole[row.singular_label.toLowerCase()] = row.role_key;
+        const label = row.singular_label.toLowerCase().trim();
+        if (labelToRole[label] && labelToRole[label] !== row.role_key) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({
+            error: `Role label "${row.singular_label}" is assigned to more than one role. Give each role a distinct label before uploading.`,
+          });
+          return;
+        }
+        labelToRole[label] = row.role_key;
       }
       // Also accept canonical names directly
       for (const key of ["student", "instructor", "admin"]) {

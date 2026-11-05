@@ -274,23 +274,14 @@ SUBSTANTIVE_HINT_TOKENS = {
 }
 
 
-def _parse_chat_history_lines(chat_history):
-    """Parse formatted chat history into an ordered list of messages."""
-    messages = []
-    if not chat_history:
-        return messages
+# Lines inside a message that look like a turn marker in the assessment
+# timeline (e.g. "AI: ..." or "3. HUMAN: ...").
+_ROLE_PREFIX_LINE_RE = re.compile(r"^([ \t]*(?:\d+\.[ \t]*)?(?:HUMAN|AI)[ \t]*:)", re.IGNORECASE | re.MULTILINE)
 
-    chunks = re.split(r"\n\n(?=(?:HUMAN|AI):)", chat_history)
-    for raw in chunks:
-        line = (raw or "").strip()
-        if not line or ":" not in line:
-            continue
-        role, content = line.split(":", 1)
-        role = role.strip().upper()
-        content = content.strip()
-        if role in {"HUMAN", "AI"} and content:
-            messages.append({"role": role, "content": content})
-    return messages
+
+def _neutralize_role_prefixes(content):
+    """Quote lines in message content that imitate a conversation turn marker."""
+    return _ROLE_PREFIX_LINE_RE.sub(r"> \1", content)
 
 
 def _is_low_effort_prompt(message):
@@ -329,8 +320,11 @@ def _build_assessment_context(chat_history):
     """
     Build an assessment payload that preserves chronology while separating
     creditable human effort from assistant context.
+
+    chat_history is a list of {"role": "HUMAN" | "AI", "content": str} taken
+    from storage, so roles never come from message text.
     """
-    parsed = _parse_chat_history_lines(chat_history)
+    parsed = chat_history or []
     if not parsed:
         return {
             "formatted_context": "",
@@ -351,14 +345,15 @@ def _build_assessment_context(chat_history):
     for idx, msg in enumerate(parsed, start=1):
         role = msg["role"]
         content = msg["content"]
-        ordered_lines.append(f"{idx}. {role}: {content}")
+        display_content = _neutralize_role_prefixes(content)
+        ordered_lines.append(f"{idx}. {role}: {display_content}")
 
         if role == "HUMAN":
-            human_lines.append(f"{len(human_lines) + 1}. {content}")
+            human_lines.append(f"{len(human_lines) + 1}. {display_content}")
             if _is_substantive_human_message(content):
                 substantive_human_turns += 1
         else:
-            assistant_lines.append(f"{len(assistant_lines) + 1}. {content}")
+            assistant_lines.append(f"{len(assistant_lines) + 1}. {display_content}")
 
     has_meaningful_human_effort = substantive_human_turns > 0
 
@@ -579,7 +574,7 @@ def get_assessment_prompt_template(block_type):
         return None
 
 
-def retrieve_dynamodb_history(table_name: str, session_id: str) -> str:
+def retrieve_dynamodb_history(table_name: str, session_id: str) -> list:
     """
     Retrieve conversation history from DynamoDB for a specific session.
     
@@ -588,7 +583,8 @@ def retrieve_dynamodb_history(table_name: str, session_id: str) -> str:
         session_id (str): Unique identifier for the conversation session.
     
     Returns:
-        str: Formatted conversation history as "HUMAN: ...\n\nAI: ..." string.
+        list: Ordered messages as {"role": "HUMAN" | "AI", "content": str},
+        with the role taken from each stored message's type.
     """
     try:
         response = dynamodb_client.get_item(
@@ -601,23 +597,22 @@ def retrieve_dynamodb_history(table_name: str, session_id: str) -> str:
         # Extract history from the item if it exists
         if 'Item' in response and 'History' in response['Item']:
             history_list = response['Item']['History']['L']
-            formatted_messages = []
+            messages = []
             
             # Process each message in the history
             for msg_wrapper in history_list:
                 msg = msg_wrapper.get('M', {})
                 data = msg.get('data', {}).get('M', {})
-                msg_type = data.get('type', {}).get('S', '')
-                content = data.get('content', {}).get('S', '')
+                msg_type = data.get('type', {}).get('S', '').upper()
+                content = data.get('content', {}).get('S', '').strip()
                 
-                # Format as "HUMAN: ..." or "AI: ..."
-                if msg_type and content:
-                    formatted_messages.append(f"{msg_type.upper()}: {content}")
+                if msg_type in {"HUMAN", "AI"} and content:
+                    messages.append({"role": msg_type, "content": content})
             
-            return "\n\n".join(formatted_messages)
+            return messages
         else:
             logger.warning(f"No history found for session_id {session_id}")
-            return ""
+            return []
     
     except ClientError as e:
         logger.error(f"Error retrieving conversation history: {e}")
@@ -628,14 +623,14 @@ def fetch_chat_history(session_id, table_name=None):
     target_table = table_name or TABLE_NAME
     if not target_table:
         logger.error("No table name provided and TABLE_NAME not initialized, cannot fetch chat history")
-        return ""
+        return []
         
     try:
         logger.info(f"Fetching chat history for session_id: {session_id} from table: {target_table}")
         return retrieve_dynamodb_history(target_table, session_id)
     except Exception as e:
         logger.exception(f"Error fetching chat history from DynamoDB for session '{session_id}': {e}")
-        return ""
+        return []
 
 def check_authorization(user_id, case_id):
     """
@@ -887,7 +882,7 @@ def handler(event, context):
                 return {"statusCode": 400}
             return create_response(400, error_msg, event)
         
-        logger.info(f"Fetched {len(chat_history)} chars of chat history for session {playground_session_id}")
+        logger.info(f"Fetched {len(chat_history)} messages of chat history for session {playground_session_id}")
         
         assessment_context = _build_assessment_context(chat_history)
         signals = assessment_context["signals"]

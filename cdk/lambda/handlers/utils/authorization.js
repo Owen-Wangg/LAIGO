@@ -50,7 +50,7 @@ async function authorizeCaseAccess(userId, caseId, permissionModel, sqlConnectio
     if (permissionModel === PERMISSION_MODELS.OWNER_ONLY) {
       const authorized = userId === caseOwnerId;
       if (!authorized) {
-        logger.debug("AuthorizeCaseAccess: Unauthorized (owner_only)", {
+        logger.warn("AuthorizeCaseAccess: Unauthorized (owner_only)", {
           userId,
           caseId,
           caseOwnerId,
@@ -78,7 +78,7 @@ async function authorizeCaseAccess(userId, caseId, permissionModel, sqlConnectio
 
       const authorized = instructorCheck.length > 0;
       if (!authorized) {
-        logger.debug(
+        logger.warn(
           "AuthorizeCaseAccess: Unauthorized (owner_or_instructor)",
           {
             userId,
@@ -99,7 +99,7 @@ async function authorizeCaseAccess(userId, caseId, permissionModel, sqlConnectio
     // Model: instructor only (excludes owner)
     if (permissionModel === PERMISSION_MODELS.INSTRUCTOR_ONLY) {
       if (userId === caseOwnerId) {
-        logger.debug("AuthorizeCaseAccess: Owner attempting instructor-only op", {
+        logger.warn("AuthorizeCaseAccess: Owner attempting instructor-only op", {
           userId,
           caseId,
         });
@@ -117,7 +117,7 @@ async function authorizeCaseAccess(userId, caseId, permissionModel, sqlConnectio
 
       const authorized = instructorCheck.length > 0;
       if (!authorized) {
-        logger.debug("AuthorizeCaseAccess: Unauthorized (instructor_only)", {
+        logger.warn("AuthorizeCaseAccess: Unauthorized (instructor_only)", {
           userId,
           caseId,
           caseOwnerId,

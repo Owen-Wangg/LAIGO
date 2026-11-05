@@ -6,6 +6,9 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import DynamoDBChatMessageHistory
 from pydantic import BaseModel, Field
 
+# Attempts allowed when the model returns an empty response
+MAX_EMPTY_RESPONSE_ATTEMPTS = 3
+
 try:
     from bedrock_client.sanitizer import sanitize_prompt_input
 except ImportError:
@@ -231,14 +234,19 @@ def get_response(
         history_messages_key="chat_history",
     )
     
-    # Generate the response until it's not empty
+    # Retry a bounded number of times if the model returns an empty response,
+    # since every attempt is a billed Bedrock call.
     response = ""
-    while not response:
+    for _ in range(MAX_EMPTY_RESPONSE_ATTEMPTS):
         response = generate_response(
             conversational_chain,
             query,
             case_id
         )
+        if response:
+            break
+    if not response:
+        raise ValueError("Model returned an empty response")
     
     return get_llm_output(response)
 

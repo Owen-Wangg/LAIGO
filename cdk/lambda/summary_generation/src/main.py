@@ -321,7 +321,6 @@ def get_case_details(case_id):
         """, (case_id,))
 
         result = cur.fetchone()
-        logger.info(f"Query result: {result}")
 
         cur.close()
 
@@ -332,8 +331,11 @@ def get_case_details(case_id):
             if isinstance(jurisdiction, list):
                 jurisdiction = ", ".join(jurisdiction)
 
-            logger.info(f"client details found for case_id {case_id}: "
-                        f"Title: {case_title} \n Case type: {case_type} \n Jurisdiction: {jurisdiction} \n Case description: {case_description}")
+            # Log identifiers/lengths only — never raw case content (privileged PII).
+            logger.info(
+                f"Case details found for case_id {case_id} "
+                f"(description length: {len(case_description or '')})"
+            )
             return case_title, case_type, jurisdiction, case_description
         else:
             logger.warning(f"No details found for case_id {case_id}")

@@ -183,6 +183,15 @@ async function createAppUsers(
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO readwrite;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tablecreator;
 
+    -- audit_log is append-only for the application roles. This runs after the
+    -- blanket grants above so every deploy re-applies it.
+    DO $$
+    BEGIN
+      IF to_regclass('public.audit_log') IS NOT NULL THEN
+        REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM readwrite, tablecreator;
+      END IF;
+    END$$;
+
     GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO readwrite;
     GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO tablecreator;
 

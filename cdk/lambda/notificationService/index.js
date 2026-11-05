@@ -171,7 +171,8 @@ async function handleRestApiRequest(event) {
 
   switch (pathData) {
     case "GET /student/notifications":
-      return await getNotifications(userId, queryStringParameters, event);
+      // API Gateway sends null, not undefined, when there is no query string.
+      return await getNotifications(userId, queryStringParameters || {}, event);
 
     case "PUT /student/notifications/{notificationId}/read":
       return await markNotificationAsRead(
@@ -383,8 +384,15 @@ async function cleanupStaleConnection(connectionId, userId) {
 /**
  * Get notifications for a user with pagination
  */
+// Largest page of notifications returned by one request
+const MAX_NOTIFICATIONS_LIMIT = 100;
+
 async function getNotifications(userId, queryParams = {}, event) {
-  const limit = parseInt(queryParams.limit) || 20;
+  const requestedLimit = parseInt(queryParams.limit, 10);
+  const limit =
+    Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(requestedLimit, MAX_NOTIFICATIONS_LIMIT)
+      : 20;
   const lastKey = queryParams.lastKey;
 
   try {
