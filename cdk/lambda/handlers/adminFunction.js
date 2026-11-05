@@ -335,6 +335,28 @@ const routes = {
 
         const student = studentLookup[0];
 
+        // The roster row grants the instructor access to the student's cases,
+        // so both parties must hold the matching role.
+        if (!Array.isArray(student.roles) || !student.roles.includes("student")) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({
+            error: "The user with that email is not a student.",
+          });
+          return;
+        }
+
+        const instructorLookup = await sqlConnection`
+              SELECT roles FROM "users" WHERE user_id = ${instructor_id};
+            `;
+        const instructorRoles = instructorLookup[0]?.roles;
+        if (!Array.isArray(instructorRoles) || !instructorRoles.includes("instructor")) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({
+            error: "User is not an instructor or doesn't exist",
+          });
+          return;
+        }
+
         // Prevent self-assignment (a user with both roles assigning themselves)
         if (instructor_id === student.user_id) {
           response.statusCode = 400;
