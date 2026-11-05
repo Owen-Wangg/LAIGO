@@ -1,4 +1,4 @@
-# LAIGO — Legal AI Guide and Organizer
+# LAIGO — Legal AI Generative Organizer
 
 This prototype explores how Large Language Models (LLMs) can enhance legal workflows by enabling intelligent case analysis, real-time transcription, and contextual feedback. By integrating AI into the legal process, it supports more efficient decision-making, improves accessibility to complex information, and fosters a deeper understanding of legal content through personalized, adaptive assistance.
 
