@@ -1464,11 +1464,21 @@ const routes = {
           return;
         }
 
-        await sqlConnection`
+        // Only an archived case can be unarchived; any other state is owned
+        // by the submit/feedback workflow and must not be reset here.
+        const unarchived = await sqlConnection`
               UPDATE "cases"
-              SET status = 'in_progress'
-              WHERE case_id = ${case_id}; 
+              SET status = 'in_progress', sent_to_review = false
+              WHERE case_id = ${case_id} AND status = 'archived'
+              RETURNING case_id;
             `;
+        if (unarchived.length === 0) {
+          response.statusCode = 409;
+          response.body = JSON.stringify({
+            error: "Only archived cases can be unarchived.",
+          });
+          return;
+        }
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: "Case Unarchived Successfully",
