@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import boto3
 import uuid
 import psycopg
@@ -45,6 +46,7 @@ TABLE_NAME_PARAM = os.environ["TABLE_NAME_PARAM"]
 BEDROCK_TEMP_PARAM = os.environ.get("BEDROCK_TEMP_PARAM")
 BEDROCK_TOP_P_PARAM = os.environ.get("BEDROCK_TOP_P_PARAM")
 BEDROCK_MAX_TOKENS_PARAM = os.environ.get("BEDROCK_MAX_TOKENS_PARAM")
+BEDROCK_MODEL_OPTIONS_PARAM = os.environ.get("BEDROCK_MODEL_OPTIONS_PARAM")
 MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]
 
 # AWS Clients
@@ -186,6 +188,40 @@ def initialize_constants():
         MESSAGE_LIMIT = "Infinity"
 
 
+def get_model_options():
+    """Return the admin-configured Bedrock model options as {model_id: constraints}.
+
+    Reads the same SSM parameter the admin AI-config routes validate against.
+    Returns an empty dict when the parameter is unset or unreadable, which
+    limits the playground to the active model.
+    """
+    if not BEDROCK_MODEL_OPTIONS_PARAM:
+        return {}
+    try:
+        raw = get_parameter(BEDROCK_MODEL_OPTIONS_PARAM, None)
+        parsed = json.loads(raw) if raw else []
+    except Exception as e:
+        logger.error(f"Could not load Bedrock model options: {e}")
+        return {}
+    if not isinstance(parsed, list):
+        return {}
+    options = {}
+    for item in parsed:
+        if isinstance(item, dict) and isinstance(item.get("value"), str) and item["value"]:
+            constraints = item.get("constraints")
+            options[item["value"]] = constraints if isinstance(constraints, dict) else {}
+    return options
+
+
+def _clamp(value, bounds):
+    """Clamp value into a [low, high] pair when the pair is well formed."""
+    if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+        low, high = bounds
+        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+            return min(max(value, low), high)
+    return value
+
+
 def get_default_system_prompt():
     return '''You are a helpful assistant to me, a law student, who answers with kindness while being concise, so that it is easy to read your responses quickly yet still get valuable information from them. No need to be conversational, just skip to talking about the content. Refer to me, the law student, in the second person. I will provide you with context to a legal case I am interviewing my client about, and you exist to help provide legal context and analysis, relevant issues, possible strategies to defend the client, and other important details in a structured natural language response.
 
@@ -290,6 +326,28 @@ def handler(event, context):
             )
         except Exception as ws_error:
             logger.error(f"Failed to send playground gate error to WebSocket: {ws_error}")
+
+    # Model gate: only models from the admin-configured options (or the active
+    # model) may be used, and inference settings are kept within that model's
+    # limits, matching what the admin AI-config route enforces.
+    model_options = get_model_options()
+    if custom_model_id != BEDROCK_LLM_ID and custom_model_id not in model_options:
+        logger.warning("Playground blocked: model is not in the configured options",
+                       extra={"userId": user_id})
+        _send_playground_error("The selected model is not available. Choose a model from the configured list.")
+        return {"statusCode": 200}
+
+    model_constraints = model_options.get(custom_model_id, {})
+    max_output_tokens = model_constraints.get("maxOutputTokens")
+    if not isinstance(max_output_tokens, int) or max_output_tokens < 1:
+        max_output_tokens = max(BEDROCK_MAX_TOKENS, 1)
+    custom_max_tokens = min(max(custom_max_tokens, 1), max_output_tokens)
+    if not math.isfinite(custom_temperature):
+        custom_temperature = BEDROCK_TEMP
+    if not math.isfinite(custom_top_p):
+        custom_top_p = BEDROCK_TOP_P
+    custom_temperature = _clamp(custom_temperature, model_constraints.get("temperatureRange", [0, 1]))
+    custom_top_p = _clamp(custom_top_p, model_constraints.get("topPRange", [0, 1]))
 
     # Consent gate: require the user to have accepted the legal/AI-use waiver
     # before any billed Bedrock work runs. Playground is not exempt. Fails
