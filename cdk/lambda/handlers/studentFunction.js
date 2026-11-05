@@ -9,6 +9,7 @@ const {
 const { PERMISSION_MODELS, authorizeCaseAccess, authorizeObjectAccess } = require("./utils/authorization");
 const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
 const { validateCaseStatusEdit } = require("./utils/caseStatusTransition");
+const { parsePagination } = require("./utils/pagination");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "StudentFunction" });
 let { MESSAGE_LIMIT, FILE_SIZE_LIMIT, TABLE_NAME } = process.env;
@@ -258,9 +259,7 @@ const routes = {
     // Use user_id from database user metadata
     try {
       const params = event.queryStringParameters || {};
-      const page = parseInt(params.page || "0", 10);
-      const limit = parseInt(params.limit || "10", 10);
-      const offset = page * limit;
+      const { limit, offset } = parsePagination(params);
       const search = params.search ? `%${params.search}%` : null;
       const status = params.status && params.status !== "All" ? params.status.toLowerCase() : null;
 

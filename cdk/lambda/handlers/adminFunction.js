@@ -68,6 +68,7 @@ const {
 } = require("@aws-sdk/client-ssm");
 
 const { evaluateRoleChange } = require("./utils/roleChange");
+const { parsePagination } = require("./utils/pagination");
 const {
   validateMessageLimit,
   validateFileSizeLimit,
@@ -460,9 +461,7 @@ const routes = {
     const { response, sqlConnection } = env;
     try {
       const params = event.queryStringParameters || {};
-      const page = parseInt(params.page || "0", 10);
-      const limit = parseInt(params.limit || "10", 10);
-      const offset = page * limit;
+      const { limit, offset } = parsePagination(params);
       const search = params.search ? `%${params.search}%` : null;
       const role = params.role && params.role !== "all" ? params.role : null;
 

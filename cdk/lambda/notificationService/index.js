@@ -383,8 +383,15 @@ async function cleanupStaleConnection(connectionId, userId) {
 /**
  * Get notifications for a user with pagination
  */
+// Largest page of notifications returned by one request
+const MAX_NOTIFICATIONS_LIMIT = 100;
+
 async function getNotifications(userId, queryParams = {}, event) {
-  const limit = parseInt(queryParams.limit) || 20;
+  const requestedLimit = parseInt(queryParams.limit, 10);
+  const limit =
+    Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(requestedLimit, MAX_NOTIFICATIONS_LIMIT)
+      : 20;
   const lastKey = queryParams.lastKey;
 
   try {
