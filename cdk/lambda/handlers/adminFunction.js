@@ -252,7 +252,7 @@ const validateConfigAgainstModelConstraints = (modelId, config, modelOptions) =>
 
   if (
     config.max_tokens !== undefined &&
-    (!Number.isFinite(config.max_tokens) ||
+    (!Number.isInteger(config.max_tokens) ||
       config.max_tokens < 1 ||
       config.max_tokens > constraints.maxOutputTokens)
   ) {
@@ -263,7 +263,8 @@ const validateConfigAgainstModelConstraints = (modelId, config, modelOptions) =>
 
   if (
     config.temperature !== undefined &&
-    (config.temperature < constraints.temperatureRange[0] ||
+    (!Number.isFinite(config.temperature) ||
+      config.temperature < constraints.temperatureRange[0] ||
       config.temperature > constraints.temperatureRange[1])
   ) {
     errors.push(
@@ -273,7 +274,8 @@ const validateConfigAgainstModelConstraints = (modelId, config, modelOptions) =>
 
   if (
     config.top_p !== undefined &&
-    (config.top_p < constraints.topPRange[0] ||
+    (!Number.isFinite(config.top_p) ||
+      config.top_p < constraints.topPRange[0] ||
       config.top_p > constraints.topPRange[1])
   ) {
     errors.push(
@@ -1192,7 +1194,7 @@ const routes = {
           ssm.send(
             new PutParameterCommand({
               Name: BEDROCK_TEMP_PARAM,
-              Value: String(body.temperature),
+              Value: String(effectiveConfig.temperature),
               Overwrite: true,
               Type: "String",
             }),
@@ -1204,7 +1206,7 @@ const routes = {
           ssm.send(
             new PutParameterCommand({
               Name: BEDROCK_TOP_P_PARAM,
-              Value: String(body.top_p),
+              Value: String(effectiveConfig.top_p),
               Overwrite: true,
               Type: "String",
             }),
@@ -1216,7 +1218,7 @@ const routes = {
           ssm.send(
             new PutParameterCommand({
               Name: BEDROCK_MAX_TOKENS_PARAM,
-              Value: String(body.max_tokens),
+              Value: String(effectiveConfig.max_tokens),
               Overwrite: true,
               Type: "String",
             }),
