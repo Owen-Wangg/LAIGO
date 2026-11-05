@@ -4,6 +4,7 @@ import boto3
 import psycopg
 import time
 import re
+import unicodedata
 from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Metrics
 from bedrock_client import get_bedrock_runtime_client
@@ -274,14 +275,53 @@ SUBSTANTIVE_HINT_TOKENS = {
 }
 
 
-# Lines inside a message that look like a turn marker in the assessment
-# timeline (e.g. "AI: ..." or "3. HUMAN: ...").
-_ROLE_PREFIX_LINE_RE = re.compile(r"^([ \t]*(?:\d+\.[ \t]*)?(?:HUMAN|AI)[ \t]*:)", re.IGNORECASE | re.MULTILINE)
+# Message content is untrusted and is embedded in the assessment prompt, so
+# lines that imitate the prompt's structure must be neutralized. Matching runs
+# on normalized text so look-alike characters cannot slip past it.
+
+# Characters that render as line breaks (CR, vertical tab, form feed, NEL,
+# unicode line/paragraph separators) are treated as newlines.
+_LINE_BREAK_RE = re.compile(r"\r\n?|[\v\f\x85\u2028\u2029]")
+# Zero-width and invisible formatting characters are dropped.
+_INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+# Any remaining whitespace other than newline (NBSP, em space, tabs, ...)
+# becomes a plain space.
+_NON_NEWLINE_SPACE_RE = re.compile(r"[^\S\n]")
+# Leading decoration a marker could hide behind: whitespace, markdown
+# emphasis/quote/heading/list characters, brackets, and list numbering.
+_LEADING_DECORATION_RE = re.compile(r"^(?:[\s*_`~#>|\-+=\[\](){}\"'.]|\d+[.)])*")
+# A turn marker: a role word followed by a colon.
+_ROLE_MARKER_RE = re.compile(r"^(?:human|ai|assistant|system|user)\b[\s*_`~]*:", re.IGNORECASE)
+# Section headers used in the assessment prompt and system instructions.
+_SECTION_HEADER_RE = re.compile(
+    r"^(?:ordered conversation timeline|creditable human turns|assistant turns"
+    r"|prompt criteria|scoring rules|instructions)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_untrusted_text(content):
+    """NFKC-normalize text and collapse look-alike whitespace and line breaks."""
+    text = unicodedata.normalize("NFKC", str(content or ""))
+    text = _LINE_BREAK_RE.sub("\n", text)
+    text = _INVISIBLE_RE.sub("", text)
+    return _NON_NEWLINE_SPACE_RE.sub(" ", text)
 
 
 def _neutralize_role_prefixes(content):
-    """Quote lines in message content that imitate a conversation turn marker."""
-    return _ROLE_PREFIX_LINE_RE.sub(r"> \1", content)
+    """
+    Quote lines in message content that imitate a conversation turn marker
+    (e.g. "AI: ...", "3. **HUMAN**: ...") or an assessment prompt section
+    header, so student text cannot forge turns or scoring sections.
+    """
+    lines = _normalize_untrusted_text(content).split("\n")
+    neutralized = []
+    for line in lines:
+        core = _LEADING_DECORATION_RE.sub("", line)
+        if _ROLE_MARKER_RE.match(core) or _SECTION_HEADER_RE.match(core):
+            line = f"> {line}"
+        neutralized.append(line)
+    return "\n".join(neutralized)
 
 
 def _is_low_effort_prompt(message):
