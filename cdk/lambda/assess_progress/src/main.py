@@ -294,7 +294,8 @@ _LEADING_DECORATION_RE = re.compile(r"^(?:[\s*_`~#>|\-+=\[\](){}\"'.]|\d+[.)])*"
 _ROLE_MARKER_RE = re.compile(r"^(?:human|ai|assistant|system|user)\b[\s*_`~]*:", re.IGNORECASE)
 # Section headers used in the assessment prompt and system instructions.
 _SECTION_HEADER_RE = re.compile(
-    r"^(?:ordered conversation timeline|creditable human turns|assistant turns"
+    r"^(?:conversation history package|ordered conversation timeline"
+    r"|creditable human turns|assistant turns"
     r"|prompt criteria|scoring rules|instructions)\b",
     re.IGNORECASE,
 )
