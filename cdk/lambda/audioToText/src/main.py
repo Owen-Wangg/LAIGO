@@ -8,12 +8,19 @@ import boto3
 import psycopg
 import urllib.request
 
+from helpers.usage import is_disclaimer_accepted
+
 # Canonical UUID format for the audio file identifier
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 # Maximum accepted length for the client-supplied file name component
 MAX_FILE_NAME_LENGTH = 200
+# Seconds between Transcribe job status checks
+TRANSCRIBE_POLL_INTERVAL_SECONDS = 5
+# Stop polling once less than this much invocation time remains, leaving room
+# to report the failure instead of being cut off by the function timeout.
+TRANSCRIBE_POLL_RESERVE_MS = 15000
 
 # Set up logging for the Lambda function
 logger = logging.getLogger()
@@ -561,6 +568,16 @@ def handler(event, context):
             logger.error(f"Access denied for user {user_id} on audio file {audio_file_id}")
             return _error_response(403, "Access denied", is_websocket, connection_id, ws_endpoint, request_id, event=event)
 
+        # 2a-ii. Require the legal/AI-use waiver before any AI processing of the
+        # recording. Fails closed if the acceptance state cannot be read.
+        try:
+            if not is_disclaimer_accepted(connect_to_db(), user_id):
+                return _error_response(403, "You must accept the disclaimer before using the AI assistant.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+        except Exception as e:
+            logger.error(f"Error checking disclaimer acceptance: {e}")
+            reset_connection()
+            return _error_response(503, "Service temporarily unavailable. Please try again later.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+
         # 2b. Validate physical file integrity (Server-side validation)
         object_key = f"{audio_file_id}/{file_name}.{file_type}"
         validate_file_integrity(AUDIO_BUCKET, object_key, file_type)
@@ -595,7 +612,7 @@ def handler(event, context):
         if is_websocket and connection_id:
             send_to_websocket(connection_id, ws_endpoint, request_id, "chunk", content="Transcription job submitted, waiting for completion...")
 
-        # Poll for job completion
+        # Poll for job completion, bounded by the time left in this invocation
         transcript_uri = None
         while True:
             resp = transcribe.get_transcription_job(TranscriptionJobName=job_name)
@@ -605,7 +622,11 @@ def handler(event, context):
                 break
             if status == "FAILED":
                 raise Exception("Transcription job failed")
-            time.sleep(5)
+            if context is not None and context.get_remaining_time_in_millis() < (
+                TRANSCRIBE_POLL_RESERVE_MS + TRANSCRIBE_POLL_INTERVAL_SECONDS * 1000
+            ):
+                raise TimeoutError(f"Transcription job {job_name} did not complete in time")
+            time.sleep(TRANSCRIBE_POLL_INTERVAL_SECONDS)
 
         if is_websocket and connection_id:
             send_to_websocket(connection_id, ws_endpoint, request_id, "chunk", content="Transcription complete, processing results...")
