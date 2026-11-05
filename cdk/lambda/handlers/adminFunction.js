@@ -748,7 +748,8 @@ const routes = {
 
       // Check if prompt exists
       const existingPrompt = await sqlConnection`
-            SELECT prompt_version_id FROM "prompt_versions"
+            SELECT prompt_version_id, prompt_text, version_name, is_active
+            FROM "prompt_versions"
             WHERE prompt_version_id = ${prompt_version_id};
           `;
 
@@ -766,6 +767,25 @@ const routes = {
             WHERE prompt_version_id = ${prompt_version_id}
             RETURNING *;
           `;
+
+      const previousPrompt = existingPrompt[0];
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "prompt.update",
+        subjectType: "prompt_version",
+        subjectId: prompt_version_id,
+        before: {
+          prompt_text: previousPrompt.prompt_text,
+          version_name: previousPrompt.version_name,
+          is_active: previousPrompt.is_active,
+        },
+        after: {
+          prompt_text: updateResult[0].prompt_text,
+          version_name: updateResult[0].version_name,
+          is_active: updateResult[0].is_active,
+        },
+      });
 
       response.body = JSON.stringify(updateResult[0]);
     } catch (err) {
@@ -1516,7 +1536,8 @@ const routes = {
 
       // Check if disclaimer exists
       const existingDisclaimer = await sqlConnection`
-            SELECT disclaimer_id FROM "disclaimers"
+            SELECT disclaimer_id, disclaimer_text, version_name, is_active
+            FROM "disclaimers"
             WHERE disclaimer_id = ${disclaimer_id};
           `;
 
@@ -1535,6 +1556,25 @@ const routes = {
             WHERE disclaimer_id = ${disclaimer_id}
             RETURNING *;
           `;
+
+      const previousDisclaimer = existingDisclaimer[0];
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.update",
+        subjectType: "disclaimer",
+        subjectId: disclaimer_id,
+        before: {
+          disclaimer_text: previousDisclaimer.disclaimer_text,
+          version_name: previousDisclaimer.version_name,
+          is_active: previousDisclaimer.is_active,
+        },
+        after: {
+          disclaimer_text: updateResult[0].disclaimer_text,
+          version_name: updateResult[0].version_name,
+          is_active: updateResult[0].is_active,
+        },
+      });
 
       response.body = JSON.stringify(updateResult[0]);
     } catch (err) {
