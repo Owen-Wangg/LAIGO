@@ -464,17 +464,22 @@ export class ApiGatewayStack extends cdk.Stack {
         accessLogDestination: new apigateway.LogGroupLogDestination(
           accessLogGroup,
         ),
-        accessLogFormat: apigateway.AccessLogFormat.jsonWithStandardFields({
-          caller: true,
-          httpMethod: true,
-          ip: true,
-          protocol: true,
-          requestTime: true,
-          resourcePath: true,
-          responseLength: true,
-          status: true,
-          user: true,
-        }),
+        // Requests are authenticated by custom Lambda authorizers, so the IAM
+        // caller/user fields are empty. Record the authorizer principal (the
+        // database user id) to attribute each request.
+        accessLogFormat: apigateway.AccessLogFormat.custom(
+          JSON.stringify({
+            requestId: apigateway.AccessLogField.contextRequestId(),
+            requestTime: apigateway.AccessLogField.contextRequestTime(),
+            principalId: apigateway.AccessLogField.contextAuthorizerPrincipalId(),
+            ip: apigateway.AccessLogField.contextIdentitySourceIp(),
+            httpMethod: apigateway.AccessLogField.contextHttpMethod(),
+            resourcePath: apigateway.AccessLogField.contextResourcePath(),
+            protocol: apigateway.AccessLogField.contextProtocol(),
+            status: apigateway.AccessLogField.contextStatus(),
+            responseLength: apigateway.AccessLogField.contextResponseLength(),
+          }),
+        ),
         methodOptions: {
           "/*/*": {
             throttlingRateLimit: 100, // 100 requests per second

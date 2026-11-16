@@ -11,55 +11,9 @@ const {
   computeWhitelistReconciliation,
 } = require("./utils/whitelistUpload");
 const { Logger } = require("@aws-lambda-powertools/logger");
+const { recordAudit } = require("./utils/audit");
 const logger = new Logger({ serviceName: "AdminFunction" });
 
-/**
- * Persist a durable record of a security-critical administrative change.
- *
- * Writes one row to audit_log capturing the acting user, the affected subject,
- * and the before/after state. Failures here are logged but never propagated:
- * an audit write must not break the underlying mutation it accompanies.
- *
- * @param {Function} sqlConnection - postgres tagged-template connection
- * @param {Object} entry
- * @param {string} [entry.actorId] - acting user's id
- * @param {string} [entry.actorEmail] - acting user's email
- * @param {string} entry.action - machine-readable action name
- * @param {string} [entry.subjectType] - type of the affected subject
- * @param {string} [entry.subjectId] - id of the affected subject
- * @param {string} [entry.subjectEmail] - email of the affected subject
- * @param {*} [entry.before] - state before the change (serialized to jsonb)
- * @param {*} [entry.after] - state after the change (serialized to jsonb)
- */
-async function recordAudit(sqlConnection, entry) {
-  try {
-    const before =
-      entry.before === undefined || entry.before === null
-        ? null
-        : JSON.stringify(entry.before);
-    const after =
-      entry.after === undefined || entry.after === null
-        ? null
-        : JSON.stringify(entry.after);
-
-    await sqlConnection`
-      INSERT INTO audit_log (
-        actor_id, actor_email, action,
-        subject_type, subject_id, subject_email,
-        before_state, after_state
-      ) VALUES (
-        ${entry.actorId ?? null}, ${entry.actorEmail ?? null}, ${entry.action},
-        ${entry.subjectType ?? null}, ${entry.subjectId ?? null}, ${entry.subjectEmail ?? null},
-        ${before}::jsonb, ${after}::jsonb
-      );
-    `;
-  } catch (err) {
-    logger.error("Failed to write audit record", {
-      action: entry?.action,
-      errorMessage: err?.message,
-    });
-  }
-}
 
 const {
   SSMClient,
@@ -1313,9 +1267,9 @@ const routes = {
     }
   },
   "POST /admin/file_size_limit": async (event, env) => {
-    const { response } = env;
+    const { response, sqlConnection } = env;
     try {
-      const { SSMClient, PutParameterCommand } =
+      const { SSMClient, GetParameterCommand, PutParameterCommand } =
         await import("@aws-sdk/client-ssm");
       const ssm = new SSMClient();
 
@@ -1337,6 +1291,16 @@ const routes = {
         return;
       }
 
+      let previousValue = null;
+      try {
+        const current = await ssm.send(
+          new GetParameterCommand({ Name: process.env.FILE_SIZE_LIMIT }),
+        );
+        previousValue = current.Parameter?.Value ?? null;
+      } catch {
+        previousValue = null;
+      }
+
       await ssm.send(
         new PutParameterCommand({
           Name: process.env.FILE_SIZE_LIMIT,
@@ -1345,6 +1309,15 @@ const routes = {
           Type: "String",
         }),
       );
+
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "file_size_limit.update",
+        subjectType: "file_size_limit",
+        before: previousValue === null ? null : { value: previousValue },
+        after: { value: String(newValue) },
+      });
 
       response.statusCode = 200;
       response.body = JSON.stringify({ success: true, value: newValue });
@@ -1575,6 +1548,15 @@ const routes = {
             DELETE FROM "disclaimers"
             WHERE disclaimer_id = ${disclaimer_id};
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.delete",
+        subjectType: "disclaimer",
+        subjectId: disclaimer_id,
+        before: { is_active: false },
+      });
 
       response.body = JSON.stringify({
         message: "Disclaimer deleted successfully",
@@ -1888,7 +1870,7 @@ const routes = {
     }
   },
   "PUT /admin/message_limit": async (event, env) => {
-    const { response } = env;
+    const { response, sqlConnection } = env;
     console.log("Updating message limit");
     if (event.body) {
       try {
@@ -1909,6 +1891,17 @@ const routes = {
         }
 
         const ssmClient = new SSMClient();
+
+        let previousLimit = null;
+        try {
+          const current = await ssmClient.send(
+            new GetParameterCommand({ Name: MESSAGE_LIMIT }),
+          );
+          previousLimit = current.Parameter?.Value ?? null;
+        } catch {
+          previousLimit = null;
+        }
+
         const command = new PutParameterCommand({
           Name: MESSAGE_LIMIT,
           Value: String(limit),
@@ -1916,6 +1909,15 @@ const routes = {
           Overwrite: true,
         });
         await ssmClient.send(command);
+
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "message_limit.update",
+          subjectType: "message_limit",
+          before: previousLimit === null ? null : { limit: previousLimit },
+          after: { limit: String(limit) },
+        });
         response.body = JSON.stringify({
           message: "Message limit updated successfully",
         });

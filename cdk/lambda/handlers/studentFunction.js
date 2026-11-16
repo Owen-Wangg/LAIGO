@@ -10,6 +10,7 @@ const { PERMISSION_MODELS, authorizeCaseAccess, authorizeObjectAccess } = requir
 const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
 const { validateCaseStatusEdit } = require("./utils/caseStatusTransition");
 const { parsePagination } = require("./utils/pagination");
+const { recordAudit } = require("./utils/audit");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "StudentFunction" });
 let { MESSAGE_LIMIT, FILE_SIZE_LIMIT, TABLE_NAME } = process.env;
@@ -170,6 +171,13 @@ const routes = {
                     DELETE FROM "summaries"
                     WHERE summary_id = ${summaryId};
                 `;
+
+        await recordAudit(sqlConnection, {
+          actorId: user_id,
+          action: "summary.delete",
+          subjectType: "summary",
+          subjectId: summaryId,
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -1214,6 +1222,13 @@ const routes = {
               DELETE FROM "audio_files"
               WHERE audio_file_id = ${audioFileId};
             `;
+
+        await recordAudit(sqlConnection, {
+          actorId: user_id,
+          action: "transcription.delete",
+          subjectType: "transcription",
+          subjectId: audioFileId,
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({

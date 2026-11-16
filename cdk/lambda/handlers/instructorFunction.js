@@ -7,6 +7,7 @@ const {
 } = require("./utils/utils");
 const { PERMISSION_MODELS, authorizeCaseAccess } = require("./utils/authorization");
 const { deleteChatHistory } = require("./utils/deleteChatHistory");
+const { recordAudit } = require("./utils/audit");
 const { parsePagination } = require("./utils/pagination");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "InstructorFunction" });
@@ -476,6 +477,12 @@ const routes = {
         throw new Error("TABLE_NAME is not configured");
       }
 
+      // Capture who owned the case before it is destroyed. Case content is
+      // privileged and is deliberately not copied into the audit record.
+      const deletedCase = await sqlConnection`
+            SELECT student_id FROM "cases" WHERE case_id = ${deleteCaseId};
+          `;
+
       // Remove privileged AI chat content before deleting the case record
       await deleteChatHistory(tableName, deleteCaseId);
 
@@ -483,6 +490,15 @@ const routes = {
       await sqlConnection`
             DELETE FROM "cases" WHERE case_id = ${deleteCaseId};
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: user.user_id,
+        actorEmail: user.email,
+        action: "case.delete",
+        subjectType: "case",
+        subjectId: deleteCaseId,
+        before: { student_id: deletedCase[0]?.student_id ?? null },
+      });
 
       response.body = JSON.stringify({
         message: "Case deleted successfully",
@@ -618,6 +634,14 @@ const routes = {
       await sqlConnection`
             DELETE FROM "messages" WHERE message_id = ${deleteMessageId};
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: instructorId,
+        actorEmail: user.email,
+        action: "feedback.delete",
+        subjectType: "feedback",
+        subjectId: deleteMessageId,
+      });
 
       response.body = JSON.stringify({
         message: "Feedback deleted successfully",

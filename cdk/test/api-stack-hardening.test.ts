@@ -79,6 +79,13 @@ describe("ApiGatewayStack production hardening", () => {
     });
   });
 
+  test("API access logs record the authorizer principal", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Stage", {
+      AccessLogSetting: {
+        Format: Match.stringLikeRegexp("principalId"),
+      },
+    });
+  });
   test("Bedrock model-invocation logging disables prompt/completion text delivery", () => {
     const serialized = JSON.stringify(template.toJSON());
     expect(serialized).toContain('textDataDeliveryEnabled\\":false');
