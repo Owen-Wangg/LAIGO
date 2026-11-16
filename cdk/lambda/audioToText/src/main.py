@@ -36,6 +36,9 @@ REGION = os.environ["REGION"]                     # AWS region for SSM and other
 RDS_PROXY_ENDPOINT = os.environ["RDS_PROXY_ENDPOINT"]  # RDS Proxy endpoint
 AUDIO_BUCKET = os.environ.get("AUDIO_BUCKET")         # S3 bucket where audio files are stored
 FILE_SIZE_LIMIT_PARAM = os.environ.get("FILE_SIZE_LIMIT_PARAM") # SSM parameter for file size limit
+# Key prefix for validated copies. Presigned upload URLs only cover
+# "{audio_file_id}/..." keys, so uploaders cannot write under this prefix.
+VALIDATED_PREFIX = "validated"
 
 # AWS clients for Secrets Manager and Parameter Store
 secrets_manager_client = boto3.client("secretsmanager")
@@ -234,6 +237,9 @@ def validate_file_integrity(bucket, key, file_type):
     """
     Validates file size and magic numbers to ensure file integrity.
     Uses structured byte signature checks for supported audio formats.
+
+    Returns the ETag of the validated object. Subsequent reads are made
+    conditional on it so only the bytes that passed validation are used.
     """
     try:
         # 1. Validate File Size
@@ -243,13 +249,14 @@ def validate_file_integrity(bucket, key, file_type):
         
         head = s3.head_object(Bucket=bucket, Key=key)
         actual_size = head['ContentLength']
+        etag = head['ETag']
         
         if actual_size > max_size_bytes:
              raise ValueError(f"File size ({actual_size / (1024*1024):.2f} MB) exceeds limit of {max_size_mb} MB")
         
         # 2. Validate File Signature (Magic Numbers)
         # Read the first 32 bytes to identify the file format
-        response = s3.get_object(Bucket=bucket, Key=key, Range='bytes=0-31')
+        response = s3.get_object(Bucket=bucket, Key=key, Range='bytes=0-31', IfMatch=etag)
         header = response['Body'].read()
         
         # Define signatures for supported formats
@@ -273,7 +280,9 @@ def validate_file_integrity(bucket, key, file_type):
         
         if not is_valid:
              raise ValueError(f"Invalid file signature for type {file_type}. Supported types: mp3, wav, m4a")
-             
+
+        return etag
+
     except Exception as e:
         logger.error(f"Integrity validation failed for {key}: {e}")
         # Clean up invalid/malicious files immediately
@@ -580,10 +589,22 @@ def handler(event, context):
 
         # 2b. Validate physical file integrity (Server-side validation)
         object_key = f"{audio_file_id}/{file_name}.{file_type}"
-        validate_file_integrity(AUDIO_BUCKET, object_key, file_type)
+        validated_etag = validate_file_integrity(AUDIO_BUCKET, object_key, file_type)
+
+        # The uploader holds a signed URL for object_key until it expires, so
+        # the object could be replaced after validation. Copy exactly the
+        # validated bytes (conditional on the ETag) to a key the uploader cannot
+        # write to, and transcribe that copy.
+        validated_key = f"{VALIDATED_PREFIX}/{object_key}"
+        s3.copy_object(
+            Bucket=AUDIO_BUCKET,
+            Key=validated_key,
+            CopySource={"Bucket": AUDIO_BUCKET, "Key": object_key},
+            CopySourceIfMatch=validated_etag,
+        )
 
         # Construct S3 file URI
-        media_file_uri = f"s3://{AUDIO_BUCKET}/{object_key}"
+        media_file_uri = f"s3://{AUDIO_BUCKET}/{validated_key}"
         logger.info(f"Starting transcription for: {media_file_uri}")
 
         # 3. Start Transcription job
@@ -651,16 +672,14 @@ def handler(event, context):
         if user_id:
             publish_transcription_notification_event(audio_file_id, user_id, file_name, case_title, case_id, success=True)
 
-        # 6. Delete the audio file from S3
-        try:
-            s3.delete_object(
-                Bucket=AUDIO_BUCKET,
-                Key=f"{audio_file_id}/{file_name}.{file_type}"
-            )
-            # amazonq-ignore-next-line
-            logger.info(f"Deleted file {audio_file_id}/{file_name}.{file_type} from S3")
-        except Exception as e:
-            logger.error(f"Failed to delete audio file from S3: {e}")
+        # 6. Delete the uploaded audio file and its validated copy from S3
+        for key_to_delete in (object_key, validated_key):
+            try:
+                s3.delete_object(Bucket=AUDIO_BUCKET, Key=key_to_delete)
+                # amazonq-ignore-next-line
+                logger.info(f"Deleted file {key_to_delete} from S3")
+            except Exception as e:
+                logger.error(f"Failed to delete audio file from S3: {e}")
 
         # 7. Return response based on invocation mode
         if is_websocket and connection_id:

@@ -276,4 +276,20 @@ describe("ApiGatewayStack security alert subscription", () => {
       }),
     ).toThrow(/securityAlertEmail must be a valid email address/);
   });
+
+  test("the presigned upload function can read the file size limit it enforces", () => {
+    const api = synthApiStack({
+      environment: "prod",
+      frontendOrigin: "https://app.example.com",
+    });
+    const template = Template.fromStack(api);
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "TestApiStack-GeneratePreSignedURLFunction",
+      Environment: {
+        Variables: Match.objectLike({
+          FILE_SIZE_LIMIT_PARAM: Match.anyValue(),
+        }),
+      },
+    });
+  });
 });

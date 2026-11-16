@@ -2238,6 +2238,7 @@ export class ApiGatewayStack extends cdk.Stack {
           REGION: this.region,
           SM_DB_CREDENTIALS: db.secretPathUser.secretName,
           RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
+          FILE_SIZE_LIMIT_PARAM: fileSizeLimitParameter.parameterName,
           ...corsEnv,
         },
         functionName: `${id}-GeneratePreSignedURLFunction`,
@@ -2253,12 +2254,24 @@ export class ApiGatewayStack extends cdk.Stack {
       .defaultChild as lambda.CfnFunction;
     cfnGeneratePreSignedURL.overrideLogicalId("GeneratePreSignedURLFunc");
 
+    // Read the administrator-configured upload size limit
+    fileSizeLimitParameter.grantRead(generatePreSignedURL);
+
     // Grant the Lambda function minimal permissions for pre-signed URL signing
+    // and for the existing-object check (HeadObject needs s3:GetObject, and
+    // s3:ListBucket so a missing key reports 404 rather than 403).
     generatePreSignedURL.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["s3:PutObject"],
+        actions: ["s3:PutObject", "s3:GetObject"],
         resources: [audioStorageBucket.arnForObjects("*")],
+      }),
+    );
+    generatePreSignedURL.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:ListBucket"],
+        resources: [audioStorageBucket.bucketArn],
       }),
     );
 

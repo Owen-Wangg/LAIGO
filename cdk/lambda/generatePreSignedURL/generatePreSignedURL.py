@@ -1,7 +1,8 @@
-import os, json, re
+import os, json, re, time
 import boto3
 import psycopg
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger
 
 # Canonical UUID format for the audio file identifier
@@ -10,9 +11,15 @@ UUID_RE = re.compile(
 )
 # Maximum accepted length for the client-supplied file name component
 MAX_FILE_NAME_LENGTH = 200
+# Fallback upload limit (MB) when the administrator has not configured one.
+# Matches the default applied by the audioToText function.
+DEFAULT_FILE_SIZE_LIMIT_MB = 500
+# Seconds to cache the configured file size limit between invocations.
+FILE_SIZE_LIMIT_CACHE_TTL = 60
 
 BUCKET = os.environ["BUCKET"]
 REGION = os.environ["REGION"]
+FILE_SIZE_LIMIT_PARAM = os.environ["FILE_SIZE_LIMIT_PARAM"]  # SSM parameter holding the max upload size in MB
 DB_SECRET_NAME = os.environ["SM_DB_CREDENTIALS"]      # Secrets Manager secret for RDS credentials
 RDS_PROXY_ENDPOINT = os.environ["RDS_PROXY_ENDPOINT"]  # RDS Proxy endpoint
 
@@ -25,12 +32,17 @@ s3 = boto3.client(
 )
 
 secrets_manager_client = boto3.client("secretsmanager")
+ssm_client = boto3.client("ssm")
 
 logger = Logger()
 
 # Cached database connection and secret to reuse across Lambda invocations
 connection = None
 db_secret = None
+
+# Cached file size limit (in bytes) and the time it was fetched
+_file_size_limit_bytes = None
+_file_size_limit_fetched_at = 0.0
 
 
 def get_secret(secret_name, expect_json=True):
@@ -142,11 +154,41 @@ def check_authorization(user_id, audio_file_id):
 
 
 def s3_key_exists(bucket, key):
+    """
+    Return True when an object already exists at the key. Only a definitive
+    "not found" answer returns False; any other failure is raised so the caller
+    does not sign a URL on an unverified key.
+    """
     try:
         s3.head_object(Bucket=bucket, Key=key)
         return True
-    except Exception:
-        return False
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+
+def get_file_size_limit_bytes():
+    """
+    Return the administrator-configured maximum upload size in bytes, cached
+    briefly so a changed limit takes effect without a redeploy.
+    """
+    global _file_size_limit_bytes, _file_size_limit_fetched_at
+    now = time.monotonic()
+    if (
+        _file_size_limit_bytes is None
+        or now - _file_size_limit_fetched_at > FILE_SIZE_LIMIT_CACHE_TTL
+    ):
+        try:
+            value = ssm_client.get_parameter(Name=FILE_SIZE_LIMIT_PARAM)["Parameter"]["Value"]
+            limit_mb = int(value)
+        except ssm_client.exceptions.ParameterNotFound:
+            limit_mb = DEFAULT_FILE_SIZE_LIMIT_MB
+        if limit_mb <= 0:
+            raise ValueError("Configured file size limit must be positive")
+        _file_size_limit_bytes = limit_mb * 1024 * 1024
+        _file_size_limit_fetched_at = now
+    return _file_size_limit_bytes
 
 
 def get_cors_origin(event):
@@ -186,12 +228,16 @@ def lambda_handler(event, context):
     audio_file_id = query_params.get("audio_file_id", "")
     file_type = query_params.get("file_type", "").lower()
     file_name = query_params.get("file_name", "")
+    file_size_raw = query_params.get("file_size", "")
 
     if not audio_file_id:
         return create_response(400, "Missing required parameter: audio_file_id", event)
 
     if not file_name:
         return create_response(400, "Missing required parameter: file_name", event)
+
+    if not file_size_raw:
+        return create_response(400, "Missing required parameter: file_size", event)
 
     # Constrain identifiers so the signed key stays within the audio file's
     # own prefix and the lookup receives a well-formed identifier.
@@ -200,6 +246,11 @@ def lambda_handler(event, context):
 
     if not is_valid_file_name(file_name):
         return create_response(400, "Invalid file_name", event)
+
+    # The declared size is signed into the URL, so it must be a plain positive integer
+    if not file_size_raw.isascii() or not file_size_raw.isdigit() or int(file_size_raw) <= 0:
+        return create_response(400, "Invalid file_size", event)
+    file_size = int(file_size_raw)
 
     # Resolve the trusted caller identity from the authorizer context
     user_id = event.get("requestContext", {}).get("authorizer", {}).get("principalId")
@@ -232,12 +283,22 @@ def lambda_handler(event, context):
     content_type = allowed_audio_types[file_type]
 
     try:
+        # Enforce the administrator limit before any bytes reach S3
+        if file_size > get_file_size_limit_bytes():
+            return create_response(413, "File size exceeds the allowed limit", event)
+
+        # Never re-issue a capability for a key that already holds an object
+        if s3_key_exists(BUCKET, key):
+            return create_response(409, "An upload already exists for this audio file", event)
+
+        # ContentLength is signed, so S3 rejects a PUT whose body size differs
         presigned_url = s3.generate_presigned_url(
             ClientMethod="put_object",
             Params={
                 "Bucket": BUCKET,
                 "Key": key,
                 "ContentType": content_type,
+                "ContentLength": file_size,
             },
             ExpiresIn=120,
             HttpMethod="PUT",

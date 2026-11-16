@@ -676,6 +676,10 @@ Generate an S3 presigned URL for audio file upload.
 - `audio_file_id` (string, required): Unique ID for the audio file
 - `file_name` (string, required): Name of the file
 - `file_type` (string, required): MIME type (e.g., `audio/mpeg`, `audio/wav`)
+- `file_size` (integer, required): Size of the file in bytes. It must not exceed the administrator-configured file size limit and is signed into the URL, so the upload must send a body of exactly this size.
+
+Returns `409` when an object already exists at the key and `413` when `file_size` exceeds the limit.
+
 
 **Response:**
 ```json
@@ -686,7 +690,7 @@ Generate an S3 presigned URL for audio file upload.
 
 **Example (cURL):**
 ```bash
-curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/generate_presigned_url?audio_file_id=uuid&file_name=interview.mp3&file_type=audio/mpeg" \
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/generate_presigned_url?audio_file_id=uuid&file_name=interview.mp3&file_type=audio/mpeg&file_size=1048576" \
   -H "Authorization: eyJraWQiOiJ..."
 ```
 ---
