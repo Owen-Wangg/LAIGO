@@ -11,6 +11,7 @@ const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
 const { validateCaseStatusEdit } = require("./utils/caseStatusTransition");
 const { parsePagination } = require("./utils/pagination");
 const { recordAudit } = require("./utils/audit");
+const { isRouteAllowedForRoles } = require("./utils/studentRoutes");
 const {
   getChangedCaseFields,
   validateCaseFieldLengths,
@@ -1681,6 +1682,19 @@ exports.handler = async (event, context) => {
 
   try {
     const pathData = event.httpMethod + " " + event.resource;
+
+    // Defense in depth: the authorizer already applies this rule, so a
+    // mistake there must not expose the student routes to other roles.
+    if (!isRouteAllowedForRoles(pathData, roles)) {
+      logger.warn("Access denied: roles do not permit this route", {
+        userId,
+        route: pathData,
+      });
+      response.statusCode = 403;
+      response.body = JSON.stringify({ error: "Forbidden" });
+      return response;
+    }
+
     const env = {
       event,
       response,

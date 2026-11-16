@@ -676,8 +676,10 @@ export class ApiGatewayStack extends cdk.Stack {
       redactedFields: [{ singleHeader: { Name: "authorization" } }],
     });
 
-    // Create single IAM role for all authenticated users
-    // Authorization is now handled by Lambda authorizers querying the database
+    // Create single IAM role for all authenticated users. It holds no API
+    // permissions: every API method is protected by a Lambda authorizer that
+    // checks the user's role against the database, none uses IAM (SigV4)
+    // auth, so no role in the identity pool needs execute-api:Invoke.
     const authenticatedRole = new iam.Role(this, `${id}-AuthenticatedRole`, {
       assumedBy: new iam.FederatedPrincipal(
         "cognito-identity.amazonaws.com",
@@ -693,22 +695,6 @@ export class ApiGatewayStack extends cdk.Stack {
       ),
     });
 
-    // Grant authenticated role permissions to invoke API Gateway endpoints
-    // Note: Actual authorization is enforced by Lambda authorizers and handlers
-    authenticatedRole.attachInlinePolicy(
-      new iam.Policy(this, `${id}-AuthenticatedPolicy`, {
-        statements: [
-          createPolicyStatement(
-            ["execute-api:Invoke"],
-            [
-              `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/prod/*/admin/*`,
-              `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/prod/*/instructor/*`,
-              `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/prod/*/student/*`,
-            ],
-          ),
-        ],
-      }),
-    );
 
     // --- IAM Roles (Least Privilege) ---
     // Instead of one shared role, each function group gets a dedicated role

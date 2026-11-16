@@ -105,6 +105,15 @@ describe("ApiGatewayStack production hardening", () => {
       expect(logGroups[groupId].Properties.RetentionInDays).toBeGreaterThan(0);
     }
   });
+  test("no IAM policy grants execute-api:Invoke to identity pool users", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const grantsInvoke = Object.values(policies).some((policy) =>
+      JSON.stringify(policy.Properties?.PolicyDocument).includes(
+        "execute-api:Invoke",
+      ),
+    );
+    expect(grantsInvoke).toBe(false);
+  });
   test("API access logs record the authorizer principal", () => {
     template.hasResourceProperties("AWS::ApiGateway::Stage", {
       AccessLogSetting: {
