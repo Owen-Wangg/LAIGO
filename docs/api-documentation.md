@@ -1221,6 +1221,9 @@ Send feedback on a student's case.
 
 **Response:** `200 OK`
 
+The caller must be one of the reviewers the student selected for the case, and the case must be submitted for review. Returns `403` when the caller is not an assigned reviewer and `409` when the case is not awaiting review. The message and the move to `reviewed` (with `time_reviewed` set) are saved together.
+
+
 **Example (cURL):**
 ```bash
 curl -X PUT "https://api-id.execute-api.us-east-1.amazonaws.com/prod/instructor/send_feedback?case_id=uuid&instructor_id=uuid" \
