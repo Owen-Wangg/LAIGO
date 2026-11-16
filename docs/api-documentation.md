@@ -1400,6 +1400,9 @@ Add or remove a single role from a user.
 - `operation` (string, required): Either `add` or `remove`
 - `role` (string, required): Role to add/remove (`admin`, `instructor`, or `student`)
 
+A user cannot add the `admin` or `instructor` role to their own account, and cannot change their own `admin` role; these return `403`. Changes to the `admin` and `instructor` roles are sent to the security alerts topic.
+
+
 **Response:** `200 OK`
 
 **Example (cURL):**
@@ -1454,6 +1457,8 @@ Create an instructor-student relationship.
   "student_id": "student-uuid"
 }
 ```
+
+An administrator cannot assign themselves as the instructor; the request returns `403`.
 
 **Response:** `200 OK`
 

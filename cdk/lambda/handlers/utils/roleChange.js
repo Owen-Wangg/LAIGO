@@ -14,6 +14,9 @@ const VALID_OPERATIONS = ["add", "remove"];
  * Separation-of-duties rules enforced here:
  *  - An admin may not add or remove the `admin` role on their own account, so
  *    privileged access is always granted or revoked by a different person.
+ *  - Nobody may grant themselves the `instructor` role. It is the role that
+ *    reaches other users' case content, so it is always granted by a different
+ *    person. Dropping their own `instructor` role is allowed.
  *  - The last remaining `admin` can never be removed, so the system cannot be
  *    left with no administrator.
  *
@@ -48,12 +51,24 @@ function evaluateRoleChange({
     };
   }
 
+  const isSelf = Boolean(actorUserId) && actorUserId === targetUserId;
+
   // Separation of duties: changing one's own admin access is never permitted.
-  if (role === "admin" && actorUserId && actorUserId === targetUserId) {
+  if (role === "admin" && isSelf) {
     return {
       allowed: false,
       statusCode: 403,
       error: "You cannot change the admin role on your own account",
+    };
+  }
+
+  // Separation of duties: nobody grants themselves access to other users'
+  // cases. Removing one's own instructor role only reduces access.
+  if (role === "instructor" && operation === "add" && isSelf) {
+    return {
+      allowed: false,
+      statusCode: 403,
+      error: "You cannot grant yourself the instructor role",
     };
   }
 

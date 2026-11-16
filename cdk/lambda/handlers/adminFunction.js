@@ -315,6 +315,16 @@ const routes = {
           return;
         }
 
+        // Separation of duties: the roster row grants access to the student's
+        // cases, so an administrator cannot assign themselves as the instructor.
+        if (instructor_id === env.user_id) {
+          response.statusCode = 403;
+          response.body = JSON.stringify({
+            error: "You cannot assign yourself as an instructor.",
+          });
+          return;
+        }
+
         // Prevent self-assignment (a user with both roles assigning themselves)
         if (instructor_id === student.user_id) {
           response.statusCode = 400;
@@ -540,9 +550,9 @@ const routes = {
         after: { roles: rolesAfter },
       });
 
-      // Surface changes to admin access on the security channel so a grant or
-      // removal of the admin role is never silent.
-      if (role === "admin") {
+      // Surface changes to admin and instructor access on the security channel
+      // so a grant or removal of either role is never silent.
+      if (role === "admin" || role === "instructor") {
         await notifySecurityEvent({
           action: "user_role.update",
           actorId: env.user_id,
@@ -1686,6 +1696,15 @@ const routes = {
           subjectEmail: instructorEmail,
           before: { roles: rolesBefore },
           after: { roles: newRoles },
+        });
+
+        await notifySecurityEvent({
+          action: "user_role.elevate_instructor",
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          subjectId: existingUser[0].user_id,
+          subjectEmail: instructorEmail,
+          detail: { operation: "add", role: "instructor", rolesAfter: newRoles },
         });
 
         response.statusCode = 200;
