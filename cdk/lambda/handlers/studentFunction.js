@@ -11,6 +11,12 @@ const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
 const { validateCaseStatusEdit } = require("./utils/caseStatusTransition");
 const { parsePagination } = require("./utils/pagination");
 const { recordAudit } = require("./utils/audit");
+const {
+  getChangedCaseFields,
+  validateCaseFieldLengths,
+  buildScreeningText,
+  screenCaseContent,
+} = require("./utils/caseContent");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "StudentFunction" });
 let { MESSAGE_LIMIT, FILE_SIZE_LIMIT, TABLE_NAME } = process.env;
@@ -1142,7 +1148,8 @@ const routes = {
 
         const allowedCaseTypes = await getAllowedCaseTypes();
         const existingCaseRows = await sqlConnection`
-              SELECT case_type, status
+              SELECT case_title, case_type, case_description, jurisdiction,
+                     province, statute, status
               FROM "cases"
               WHERE case_id = ${case_id}
               LIMIT 1;
@@ -1167,6 +1174,44 @@ const routes = {
         if (!statusCheck.allowed) {
           response.statusCode = statusCheck.statusCode;
           response.body = JSON.stringify({ error: statusCheck.error });
+          return;
+        }
+
+        // Case content is later placed into AI prompts, so edits get the same
+        // screening as case creation. Only changed fields are checked.
+        const changedFields = getChangedCaseFields(existingCaseRows[0], {
+          case_title,
+          case_type,
+          case_description,
+          jurisdiction,
+          province,
+          statute,
+        });
+
+        const lengthCheck = validateCaseFieldLengths(changedFields);
+        if (!lengthCheck.valid) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: lengthCheck.error });
+          return;
+        }
+
+        let screening;
+        try {
+          screening = await screenCaseContent(
+            buildScreeningText(changedFields),
+          );
+        } catch (screenErr) {
+          // Fail closed: never save content that could not be screened.
+          logger.error("Case content screening failed", screenErr);
+          response.statusCode = 503;
+          response.body = JSON.stringify({
+            error: "Service temporarily unavailable. Please try again later.",
+          });
+          return;
+        }
+        if (screening.blocked) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: screening.message });
           return;
         }
 

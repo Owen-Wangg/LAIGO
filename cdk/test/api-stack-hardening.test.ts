@@ -79,6 +79,19 @@ describe("ApiGatewayStack production hardening", () => {
     });
   });
 
+  test("the student function can screen edited case content with the guardrail", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "TestApiStack-studentFunction",
+      Environment: {
+        Variables: Match.objectLike({
+          GUARDRAIL_ID: Match.anyValue(),
+          GUARDRAIL_VERSION: Match.anyValue(),
+        }),
+      },
+    });
+    const serialized = JSON.stringify(template.toJSON());
+    expect(serialized).toContain("bedrock:ApplyGuardrail");
+  });
   test("API access logs record the authorizer principal", () => {
     template.hasResourceProperties("AWS::ApiGateway::Stage", {
       AccessLogSetting: {

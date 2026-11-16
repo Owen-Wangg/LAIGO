@@ -1587,6 +1587,8 @@ export class ApiGatewayStack extends cdk.Stack {
           CASE_TYPES_PARAM: caseTypesParameter.parameterName,
           NOTIFICATION_EVENT_BUS_NAME: notificationEventBus.eventBusName,
           TABLE_NAME: `${id}-Conversation-Table`,
+          GUARDRAIL_ID: textGenGuardrail.attrGuardrailId,
+          GUARDRAIL_VERSION: textGenGuardrailVersion.attrVersion,
           ...corsEnv,
         },
         functionName: `${id}-studentFunction`,
@@ -1598,6 +1600,15 @@ export class ApiGatewayStack extends cdk.Stack {
 
     // Grant RDS Proxy connect permission to student function
     db.dbInstance.grantConnect(lambdaStudentFunction, "applicationUsername");
+
+    // Edited case content is screened with the same guardrail as case creation
+    lambdaStudentFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["bedrock:ApplyGuardrail"],
+        resources: [textGenGuardrail.attrGuardrailArn],
+      }),
+    );
 
     // Allow access to DynamoDB Table for reading chat history
     chatHistoryTable.grantReadData(lambdaStudentFunction);
@@ -2453,9 +2464,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // Grant access to Bedrock (using shared policy with specific model ARNs)
     summaryGenerationFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // NOTE: No guardrail grant for summaryGenerationFunction (finding M5). Same
-    // rationale as assessProgressFunction above — it summarizes already-validated
-    // conversation content, has no GUARDRAIL_ID/VERSION, and never calls
+    // NOTE: No guardrail grant for summaryGenerationFunction. Same rationale as
+    // assessProgressFunction above — it summarizes conversation content and case
+    // details that were already screened, at creation (case_generation) and on
+    // every edit (studentFunction), has no GUARDRAIL_ID/VERSION, and never calls
     // apply_guardrail. The unused bedrock:*Guardrail grant is removed (least
     // privilege); re-applying PII blocking here would falsely block legal names.
 

@@ -196,6 +196,9 @@ Update case details.
 - `province` (string, required): Province/Territory
 - `statute` (string, required): Relevant statute details
 
+Fields you change are screened with the same content guardrail as case creation, and an unchanged field is not re-screened. Returns `400` when a changed field is too long or is blocked by the guardrail, and `503` when screening is unavailable. Limits: `case_title` 200 characters, `case_description` 4000, `province` and `statute` 200 each, and `jurisdiction` up to 20 entries of 100 characters.
+
+
 **Response:** `200 OK`
 
 **Example (cURL):**
