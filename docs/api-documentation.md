@@ -1407,7 +1407,7 @@ curl -X PUT "https://api-id.execute-api.us-east-1.amazonaws.com/prod/admin/user_
 
 ### Elevate User to Instructor
 
-Replace an existing user's `student` role with `instructor`. The user must already exist in the database.
+Add the `instructor` role to an existing user, keeping their other roles. The user must already exist in the database. The change goes through the same locked, policy-checked transaction as `PUT /admin/user_role`.
 
 **Endpoint:** `POST /admin/elevate_instructor`
 

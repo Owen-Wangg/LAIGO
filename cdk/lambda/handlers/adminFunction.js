@@ -67,7 +67,8 @@ const {
   PutParameterCommand,
 } = require("@aws-sdk/client-ssm");
 
-const { evaluateRoleChange } = require("./utils/roleChange");
+const { applyRoleChanges } = require("./utils/applyRoleChanges");
+
 const { parsePagination } = require("./utils/pagination");
 const {
   validateMessageLimit,
@@ -555,64 +556,16 @@ const routes = {
 
       const userIdToUpdate = existingUser[0].user_id;
 
-      // Run the admin-count check and the role update in a single transaction,
-      // locking the target row and every admin row, so the admin count cannot
-      // change between the decision and the write. This closes the race where
-      // two concurrent removals could each see a safe count and together drop
-      // the last administrator.
-      let decision;
-      let currentRoles = [];
-      await sqlConnection.begin(async (sql) => {
-        const lockedUser = await sql`
-              SELECT roles FROM "users" WHERE user_id = ${userIdToUpdate} FOR UPDATE;
-            `;
-        currentRoles = lockedUser[0]?.roles || [];
-
-        const adminRows = await sql`
-              SELECT user_id FROM "users" WHERE 'admin' = ANY(roles) FOR UPDATE;
-            `;
-        const totalAdminCount = adminRows.length;
-
-        decision = evaluateRoleChange({
-          currentRoles,
-          operation,
-          role,
-          actorUserId: env.user_id,
+      // Check the policy and apply the change in one locked transaction so the
+      // admin count cannot change between the decision and the write.
+      const { decision, rolesBefore: currentRoles } = await applyRoleChanges(
+        sqlConnection,
+        {
           targetUserId: userIdToUpdate,
-          totalAdminCount,
-        });
-
-        // Not permitted: make no changes and let the transaction commit the
-        // read-only locks. The response is derived from `decision` below.
-        if (!decision.allowed) {
-          return;
-        }
-
-        if (operation === "add") {
-          // Append role only if not already present
-          if (!currentRoles.includes(role)) {
-            await sql`
-                  UPDATE "users"
-                  SET roles = array_append(roles, ${role}::user_role)
-                  WHERE user_id = ${userIdToUpdate};
-                `;
-          }
-        } else {
-          await sql`
-                UPDATE "users"
-                SET roles = array_remove(roles, ${role}::user_role)
-                WHERE user_id = ${userIdToUpdate};
-              `;
-
-          // Clean up instructor assignments when instructor role is removed
-          if (role === "instructor") {
-            await sql`
-                  DELETE FROM "instructor_students"
-                  WHERE instructor_id = ${userIdToUpdate};
-                `;
-          }
-        }
-      });
+          actorUserId: env.user_id,
+          changes: [{ operation, role }],
+        },
+      );
 
       if (!decision.allowed) {
         response.statusCode = decision.statusCode;
@@ -1723,16 +1676,24 @@ const routes = {
           return;
         }
 
-        // User is a student - elevate to instructor in database only
-        const newRoles = userRoles.map((role) =>
-          role === "student" ? "instructor" : role,
+        // Add the instructor role through the guarded role-change path. The
+        // existing roles are kept, matching PUT /admin/user_role.
+        const { decision, rolesBefore } = await applyRoleChanges(
+          sqlConnection,
+          {
+            targetUserId: existingUser[0].user_id,
+            actorUserId: env.user_id,
+            changes: [{ operation: "add", role: "instructor" }],
+          },
         );
 
-        await sqlConnection`
-              UPDATE "users"
-              SET roles = ${newRoles}
-              WHERE user_email = ${instructorEmail};
-            `;
+        if (!decision.allowed) {
+          response.statusCode = decision.statusCode;
+          response.body = JSON.stringify({ error: decision.error });
+          return;
+        }
+
+        const newRoles = decision.rolesAfter;
 
         await recordAudit(sqlConnection, {
           actorId: env.user_id,
@@ -1741,7 +1702,7 @@ const routes = {
           subjectType: "user",
           subjectId: existingUser[0].user_id,
           subjectEmail: instructorEmail,
-          before: { roles: userRoles },
+          before: { roles: rolesBefore },
           after: { roles: newRoles },
         });
 
@@ -1786,23 +1747,28 @@ const routes = {
           return;
         }
 
-        // Replace 'instructor' with 'student'
-        const updatedRoles = userRoles
-          .filter((role) => role !== "instructor")
-          .concat("student");
+        // Replace 'instructor' with 'student' through the guarded role-change
+        // path. Adding student first keeps the user from ever holding no role.
+        // Removing instructor also deletes their instructor assignments.
+        const { decision, rolesBefore } = await applyRoleChanges(
+          sqlConnection,
+          {
+            targetUserId: user_id,
+            actorUserId: env.user_id,
+            changes: [
+              { operation: "add", role: "student" },
+              { operation: "remove", role: "instructor" },
+            ],
+          },
+        );
 
-        // Update the roles in the database
-        await sqlConnection`
-                    UPDATE "users"
-                    SET roles = ${updatedRoles}
-                    WHERE user_id = ${user_id};
-                  `;
+        if (!decision.allowed) {
+          response.statusCode = decision.statusCode;
+          response.body = JSON.stringify({ error: decision.error });
+          return;
+        }
 
-        // Remove from instructor_students table
-        await sqlConnection`
-      DELETE FROM "instructor_students"
-      WHERE instructor_id = ${user_id};
-    `;
+        const updatedRoles = decision.rolesAfter;
 
         await recordAudit(sqlConnection, {
           actorId: env.user_id,
@@ -1810,7 +1776,7 @@ const routes = {
           action: "user_role.lower_instructor",
           subjectType: "user",
           subjectId: user_id,
-          before: { roles: userRoles },
+          before: { roles: rolesBefore },
           after: { roles: updatedRoles },
         });
 
