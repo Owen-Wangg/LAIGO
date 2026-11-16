@@ -62,7 +62,7 @@ exports.handler = async (event) => {
 
     const parts = email.split("@");
     if (parts.length < 2) {
-      throw new UserError(`Invalid email address provided: ${email}`);
+      throw new UserError("Invalid email address provided");
     }
     const emailDomain = parts.slice(1).join("@").trim().toLowerCase();
     logger.info("Signup request", { emailDomain });

@@ -92,6 +92,19 @@ describe("ApiGatewayStack production hardening", () => {
     const serialized = JSON.stringify(template.toJSON());
     expect(serialized).toContain("bedrock:ApplyGuardrail");
   });
+  test("every Lambda function logs to a group with bounded retention", () => {
+    const functions = template.findResources("AWS::Lambda::Function");
+    const logGroups = template.findResources("AWS::Logs::LogGroup");
+    const functionNames = Object.keys(functions);
+    expect(functionNames.length).toBeGreaterThan(0);
+    for (const name of functionNames) {
+      const logGroupRef = functions[name].Properties?.LoggingConfig?.LogGroup;
+      expect(logGroupRef).toBeDefined();
+      const groupId = logGroupRef.Ref;
+      expect(logGroups[groupId]).toBeDefined();
+      expect(logGroups[groupId].Properties.RetentionInDays).toBeGreaterThan(0);
+    }
+  });
   test("API access logs record the authorizer principal", () => {
     template.hasResourceProperties("AWS::ApiGateway::Stage", {
       AccessLogSetting: {
