@@ -291,6 +291,8 @@ Archive a case.
 **Query Parameters:**
 - `case_id` (string, required): The case ID
 
+Only a case with status `in_progress` can be archived; any other status returns `409`. A submitted or reviewed case keeps its review state because unarchiving resets a case to `in_progress`.
+
 **Response:** `200 OK`
 
 **Example (cURL):**
@@ -1270,6 +1272,8 @@ Archive a student's case.
 
 **Query Parameters:**
 - `case_id` (string, required): The ID of the case to archive
+
+Only a case with status `in_progress` can be archived; any other status returns `409`. A submitted or reviewed case keeps its review state because unarchiving resets a case to `in_progress`.
 
 **Response:**
 ```json

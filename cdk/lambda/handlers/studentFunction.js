@@ -1479,11 +1479,22 @@ const routes = {
           return;
         }
 
-        await sqlConnection`
+        // Only a case still being worked on can be archived. Unarchiving
+        // resets a case to in_progress, so archiving a submitted or reviewed
+        // case would erase its review state.
+        const archived = await sqlConnection`
               UPDATE "cases"
               SET status = 'archived'
-              WHERE case_id = ${case_id}; 
+              WHERE case_id = ${case_id} AND status = 'in_progress'
+              RETURNING case_id;
             `;
+        if (archived.length === 0) {
+          response.statusCode = 409;
+          response.body = JSON.stringify({
+            error: "Only in-progress cases can be archived.",
+          });
+          return;
+        }
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: "Case Archived Successfully",
