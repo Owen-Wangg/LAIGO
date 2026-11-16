@@ -192,8 +192,9 @@ def connect_to_db():
 
 def check_authorization(user_id, case_id):
     """
-    Verify that the user (identified by user_id) owns the specified case 
-    or is an instructor for the case owner.
+    Verify that the user (identified by user_id) owns the specified case.
+    Generating a summary writes to the case, so only the owner may do it; an
+    instructor can read the resulting summaries but not create them.
     Prevents IDOR attacks by checking case ownership.
     
     Args:
@@ -211,19 +212,12 @@ def check_authorization(user_id, case_id):
         conn = connect_to_db()
         # Use context manager for automatic cursor cleanup
         with conn.cursor() as cursor:
-            # Single query to check both ownership and instructor relationship
             query = """
                 SELECT 1 FROM "cases" c
                 WHERE c.case_id = %s
-                AND (
-                    c.student_id = %s
-                    OR EXISTS (
-                        SELECT 1 FROM instructor_students 
-                        WHERE instructor_id = %s AND student_id = c.student_id
-                    )
-                );
+                AND c.student_id = %s;
             """
-            cursor.execute(query, (case_id, user_id, user_id))
+            cursor.execute(query, (case_id, user_id))
             is_authorized = cursor.fetchone() is not None
             
             if is_authorized:

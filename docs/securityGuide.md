@@ -391,7 +391,7 @@ const lambdaStudentFunction = new lambda.Function(this, `${id}-studentFunction`,
 | `TextGenLambdaDockerFunc`           | Private          | REST `POST /student/text_generation`; WebSocket `generate_text` | Case owner (the handler checks ownership) |
 | `GeneratePreSignedURLFunc`          | Private          | REST `GET /student/generate_presigned_url` | Users with the **student** role             |
 | `CaseGenLambdaDockerFunc`           | Private          | REST `POST /student/new_case`              | Users with the **student** role             |
-| `SummaryGenerationFunction`         | Private          | REST `GET /student/generate_summary`; WebSocket `generate_summary` | Case owner or an instructor of the case owner |
+| `SummaryGenerationFunction`         | Private          | REST `GET /student/generate_summary`; WebSocket `generate_summary` | Case owner with the student role |
 | `audioToTextFunction`               | Private          | REST `GET /student/audio_to_text`; WebSocket `audio_to_text` | Users with the **student** role |
 | `PlaygroundTextGenLambdaDockerFunc` | Private          | WebSocket `playground_test`                | Users with the **admin** or **instructor** role |
 | `AssessProgressFunction`            | Private          | REST `POST /student/assess_progress`; WebSocket `assess_progress` and `playground_assess` | Case owner; playground mode requires **admin** or **instructor** |
