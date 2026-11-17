@@ -625,6 +625,7 @@ All role changes, from `PUT /admin/user_role`, `POST /admin/elevate_instructor` 
 - The last administrator cannot be removed, and a user's only role cannot be removed.
 - A request that changes more than one role (such as POST /admin/lower_instructor) is all or nothing. If any change in the batch is refused, the transaction is rolled back and none of the earlier changes are saved.
 - Granting or removing the `admin` or `instructor` role through `PUT /admin/user_role`, and elevating a user through `POST /admin/elevate_instructor`, are published to the security alerts topic as well as written to `audit_log`.
+- A refused role change is also written to `audit_log`, with the action name suffixed `.denied` (for example `user_role.update.denied`). `after_state` holds `outcome: "denied"`, the reason, the HTTP status and the requested changes, and `before_state` holds the user's unchanged roles. This covers every refusal from the policy, including a self-change, removing the last administrator, and malformed requests, so filter on the reason or status when looking for probing.
 
 #### Case Workflow Controls
 
