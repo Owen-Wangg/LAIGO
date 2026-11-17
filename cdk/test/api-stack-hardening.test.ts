@@ -114,6 +114,16 @@ describe("ApiGatewayStack production hardening", () => {
     );
     expect(grantsInvoke).toBe(false);
   });
+  test("the audio transcription function can read the daily message limit", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "TestApiStack-audioToTextFunc",
+      Environment: {
+        Variables: Match.objectLike({
+          MESSAGE_LIMIT_PARAM: Match.anyValue(),
+        }),
+      },
+    });
+  });
   test("API access logs record the authorizer principal", () => {
     template.hasResourceProperties("AWS::ApiGateway::Stage", {
       AccessLogSetting: {

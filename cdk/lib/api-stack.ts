@@ -2305,10 +2305,14 @@ export class ApiGatewayStack extends cdk.Stack {
           RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
           REGION: this.region,
           FILE_SIZE_LIMIT_PARAM: fileSizeLimitParameter.parameterName,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
     );
+
+    // Read the daily per-user message limit shared by every AI function
+    messageLimitParameter.grantRead(audioToTextFunction);
 
     const cfnAudioToTextFunction = audioToTextFunction.node
       .defaultChild as lambda.CfnFunction;

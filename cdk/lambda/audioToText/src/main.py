@@ -8,7 +8,7 @@ import boto3
 import psycopg
 import urllib.request
 
-from helpers.usage import is_disclaimer_accepted
+from helpers.usage import check_and_increment_usage, is_disclaimer_accepted
 
 # Canonical UUID format for the audio file identifier
 UUID_RE = re.compile(
@@ -36,6 +36,7 @@ REGION = os.environ["REGION"]                     # AWS region for SSM and other
 RDS_PROXY_ENDPOINT = os.environ["RDS_PROXY_ENDPOINT"]  # RDS Proxy endpoint
 AUDIO_BUCKET = os.environ.get("AUDIO_BUCKET")         # S3 bucket where audio files are stored
 FILE_SIZE_LIMIT_PARAM = os.environ.get("FILE_SIZE_LIMIT_PARAM") # SSM parameter for file size limit
+MESSAGE_LIMIT_PARAM = os.environ["MESSAGE_LIMIT_PARAM"]  # SSM parameter for the daily per-user message limit
 # Key prefix for validated copies. Presigned upload URLs only cover
 # "{audio_file_id}/..." keys, so uploaders cannot write under this prefix.
 VALIDATED_PREFIX = "validated"
@@ -48,6 +49,8 @@ eventbridge_client = boto3.client("events", region_name=REGION)
 # Cached database connection and secret to reuse across Lambda invocations
 connection = None
 db_secret = None
+# Cached daily message limit ("Infinity" disables the quota)
+MESSAGE_LIMIT = None
 
 
 def send_to_websocket(connection_id, endpoint, request_id, msg_type, content=None, data=None):
@@ -590,6 +593,30 @@ def handler(event, context):
         # 2b. Validate physical file integrity (Server-side validation)
         object_key = f"{audio_file_id}/{file_name}.{file_type}"
         validated_etag = validate_file_integrity(AUDIO_BUCKET, object_key, file_type)
+
+        # Enforce the daily message limit before starting the billed Transcribe
+        # job. Counts as one message per request and fails closed if the usage
+        # check cannot complete.
+        global MESSAGE_LIMIT
+        MESSAGE_LIMIT = get_parameter(MESSAGE_LIMIT_PARAM, MESSAGE_LIMIT)
+        if MESSAGE_LIMIT is None:
+            MESSAGE_LIMIT = "Infinity"
+        if MESSAGE_LIMIT != "Infinity":
+            try:
+                limit = int(MESSAGE_LIMIT)
+                current_usage = check_and_increment_usage(connect_to_db(), user_id)
+                logger.info(f"User {user_id} usage: {current_usage}/{limit}")
+            except Exception as e:
+                logger.error(f"Error checking message limit: {e}")
+                reset_connection()
+                return _error_response(503, "Service temporarily unavailable. Please try again later.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
+            if current_usage > limit:
+                # The upload will not be transcribed, so do not keep it.
+                try:
+                    s3.delete_object(Bucket=AUDIO_BUCKET, Key=object_key)
+                except Exception as del_e:
+                    logger.error(f"Failed to delete rejected upload {object_key}: {del_e}")
+                return _error_response(429, "Daily message limit reached. Please contact your administrator.", is_websocket, connection_id, ws_endpoint, request_id, event=event)
 
         # The uploader holds a signed URL for object_key until it expires, so
         # the object could be replaced after validation. Copy exactly the
