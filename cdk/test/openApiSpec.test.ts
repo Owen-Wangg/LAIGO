@@ -63,3 +63,18 @@ describe("OpenAPI request validators", () => {
     expect(settings).toMatch(/validateRequestParameters:\s*true/);
   });
 });
+
+describe("OpenAPI authorizer caching", () => {
+  // The authorizer Lambdas keep their own user cache for 60 seconds and are
+  // written to catch revoked roles within that window. A longer gateway cache
+  // would keep a revoked role working for its whole length.
+  test("every authorizer result is cached for at most 60 seconds", () => {
+    const ttls = [...spec.matchAll(/authorizerResultTtlInSeconds:\s*(\d+)/g)].map(
+      (m) => Number(m[1]),
+    );
+    expect(ttls.length).toBeGreaterThan(0);
+    for (const ttl of ttls) {
+      expect(ttl).toBeLessThanOrEqual(60);
+    }
+  });
+});
