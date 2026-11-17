@@ -623,6 +623,7 @@ All role changes, from `PUT /admin/user_role`, `POST /admin/elevate_instructor` 
 - Nobody can add or remove the `admin` role on their own account, and nobody can grant themselves the `instructor` role. Removing your own `instructor` role is allowed.
 - An administrator cannot assign themselves as an instructor to a student (`POST /admin/assign_instructor_to_student`).
 - The last administrator cannot be removed, and a user's only role cannot be removed.
+- A request that changes more than one role (such as POST /admin/lower_instructor) is all or nothing. If any change in the batch is refused, the transaction is rolled back and none of the earlier changes are saved.
 - Granting or removing the `admin` or `instructor` role through `PUT /admin/user_role`, and elevating a user through `POST /admin/elevate_instructor`, are published to the security alerts topic as well as written to `audit_log`.
 
 #### Case Workflow Controls
