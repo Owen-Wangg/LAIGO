@@ -39,7 +39,8 @@ except ImportError:
         ]
         for pat in injection_patterns:
             if _re.search(pat, sanitized):
-                _logger.warning("Prompt injection pattern detected in user input (first 100 chars): %.100s", sanitized)
+                # Log the input length only; the input is privileged client content.
+                _logger.warning("Prompt injection pattern detected in user input (input length: %d)", len(sanitized))
                 return (sanitized, True)
         return (sanitized, False)
 

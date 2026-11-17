@@ -191,6 +191,27 @@ async function createAppUsers(
         REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM readwrite, tablecreator;
       END IF;
     END$$;
+    -- users.roles can be changed only through the table creator role, which the
+    -- admin handler uses. The readwrite role (student, instructor and other
+    -- handlers) keeps UPDATE on every other column. This also runs after the
+    -- blanket grants, and column grants are rebuilt from the current columns
+    -- so new columns stay writable.
+    DO $$
+    DECLARE
+      writable_columns text;
+    BEGIN
+      IF to_regclass('public.users') IS NOT NULL THEN
+        REVOKE UPDATE ON public.users FROM readwrite;
+        SELECT string_agg(quote_ident(column_name), ', ') INTO writable_columns
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'users'
+          AND column_name <> 'roles';
+        IF writable_columns IS NOT NULL THEN
+          EXECUTE format('GRANT UPDATE (%s) ON public.users TO readwrite', writable_columns);
+        END IF;
+      END IF;
+    END$$;
 
     GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO readwrite;
     GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO tablecreator;

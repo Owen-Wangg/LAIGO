@@ -26,6 +26,8 @@ VPC Configuration:
 - By default, `VpcStack` creates a new VPC (CIDR `10.0.0.0/16`, overridable with the `vpcCidr` context value) across 2 Availability Zones in the deployment region
 - `VpcStack` also supports deploying into an existing VPC (for example, one managed by Control Tower) by setting `existingVpcId` and related values in `cdk/lib/vpc-stack.ts`
 - VPC flow logs capture all traffic to CloudWatch Logs (`/vpc/flow-logs/<StackPrefix>-VpcStack`, 3-month retention)
+- Each Lambda function logs to its CDK-managed log group (`/aws/lambda/<function name>`) with a bounded retention period (3 months in `prod`, 1 week otherwise). Function code logs lengths and identifiers, not case text, email addresses, or model output.
+- API Gateway caches each authorizer decision for 60 seconds (`authorizerResultTtlInSeconds` in `OpenAPI_Swagger_Definition.yaml`), so a role removed in the admin console stops working for REST calls within about a minute. An open WebSocket connection keeps the roles it had at connect time until it reaches its maximum session length.
 
 #### Subnet Configuration:
 
@@ -85,9 +87,9 @@ Traffic from VPC Lambda functions to these services stays on the AWS network. Ot
 
   1. Client Request: The client first requests a pre-signed URL by making an API call to the Amazon API Gateway
 
-  2. Pre-Signed URL Generation: The API Gateway invokes an AWS Lambda function, which is responsible for generating the pre-signed URL. The Lambda function checks for the appropriate permissions (PutObject action) for the requested S3 bucket
+  2. Pre-Signed URL Generation: The API Gateway invokes an AWS Lambda function, which is responsible for generating the pre-signed URL. The Lambda function confirms that the caller owns the case the audio file belongs to, checks the declared file size against the administrator's file size limit (`413` if it is over), refuses to issue a URL for a key that already holds an object (`409`), and signs the declared size into the URL
 
-  3. Permission Validation: If permissions are validated, the Lambda function returns the generated pre-signed URL to the client
+  3. URL Returned: If those checks pass, the Lambda function returns the generated pre-signed URL to the client. S3 rejects an upload whose body size differs from the signed size
 
   4. File Upload: The client uses this pre-signed URL to upload files directly to S3, bypassing the need for the server to handle large file uploads. This approach ensures:
 
@@ -107,6 +109,7 @@ Traffic from VPC Lambda functions to these services stays on the AWS network. Ot
   - Public access is blocked for all S3 buckets
   - SSL connections are enforced for secure data transfer
   - Lifecycle rules expire stored objects (for example, S3 access logs after 90 days)
+  - Before transcription, the audio function validates the uploaded object (size and file signature), copies exactly the validated bytes to a `validated/` prefix that upload URLs cannot write to, and transcribes the copy. Both objects are deleted afterward
 
 - **Amazon API Gateway:**
 
@@ -195,7 +198,7 @@ Lambda functions that do not need the database (the WebSocket `$connect`, `$disc
 - TLS required for all client connections (`requireTLS: true`)
 - Clients authenticate with database credentials stored in Secrets Manager; the proxy's IAM role reads those secrets and has `rds-db:connect` on this instance only
 - Connection pooling limits credential exposure
-- Application roles have least privilege: `app_rw` (via the `readwrite` role) for runtime handlers and `app_tc` (via `tablecreator`) for the admin handler. Neither role can `UPDATE`, `DELETE`, or `TRUNCATE` the `audit_log` table.
+- Application roles have least privilege: `app_rw` (via the `readwrite` role) for runtime handlers and `app_tc` (via `tablecreator`) for the admin handler. Neither role can `UPDATE`, `DELETE`, or `TRUNCATE` the `audit_log` table. The `readwrite` role cannot `UPDATE` the `users.roles` column; only `tablecreator`, which the admin handler uses, can. Role changes therefore have to go through the admin handler.
 
 ## 4. Secrets & Parameters
 
@@ -263,6 +266,22 @@ Two separate WAF Web ACLs protect the application:
 - Apply security standards like AWS Foundational Security Best Practices
 - Use custom insights and filters (e.g., resources.tags.Project = "LAIGO", depending on the name your instance is deployed under) to focus on relevant resources
 - Remediate issues based on the severity and compliance requirements
+
+### 5.3 Browser Security Headers
+
+**Purpose:** Limit what a script injected into the single-page app can do, and stop the app being framed by other sites
+
+Amplify serves these headers on every response for the frontend. They are set as custom response headers on the Amplify app in `cdk/lib/amplify-stack.ts` (headers placed inside the build spec are not applied by Amplify):
+
+| Header | Value |
+| --- | --- |
+| `Content-Security-Policy` | `script-src 'self'` (no inline scripts, no `eval`), `object-src 'none'`, `base-uri 'self'`, `frame-ancestors 'none'`, and a `connect-src` limited to the frontend, API, WebSocket, Cognito, and the two S3 buckets in production |
+| `X-Frame-Options` | `DENY` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+
+`style-src` keeps `'unsafe-inline'` because the UI library injects styles. The Vite dev server uses its own, looser policy for hot reload. The production bundle contains no inline scripts and no `eval`, so `script-src` needs nothing beyond `'self'`; if you add a dependency that needs either, test it in a deployed build before loosening the policy.
 
 ## 6. RDS Security
 
@@ -391,8 +410,8 @@ const lambdaStudentFunction = new lambda.Function(this, `${id}-studentFunction`,
 | `TextGenLambdaDockerFunc`           | Private          | REST `POST /student/text_generation`; WebSocket `generate_text` | Case owner (the handler checks ownership) |
 | `GeneratePreSignedURLFunc`          | Private          | REST `GET /student/generate_presigned_url` | Users with the **student** role             |
 | `CaseGenLambdaDockerFunc`           | Private          | REST `POST /student/new_case`              | Users with the **student** role             |
-| `SummaryGenerationFunction`         | Private          | REST `GET /student/generate_summary`; WebSocket `generate_summary` | Case owner or an instructor of the case owner |
-| `audioToTextFunction`               | Private          | REST `GET /student/audio_to_text`; WebSocket `audio_to_text` | Users with the **student** role |
+| `SummaryGenerationFunction`         | Private          | REST `GET /student/generate_summary`; WebSocket `generate_summary` | Case owner with the student role |
+| `audioToTextFunction`               | Private          | REST `GET /student/audio_to_text`; WebSocket `audio_to_text` | Case owner. REST requires the **student** role; the WebSocket action checks only that the caller is authenticated and owns the case |
 | `PlaygroundTextGenLambdaDockerFunc` | Private          | WebSocket `playground_test`                | Users with the **admin** or **instructor** role |
 | `AssessProgressFunction`            | Private          | REST `POST /student/assess_progress`; WebSocket `assess_progress` and `playground_assess` | Case owner; playground mode requires **admin** or **instructor** |
 | `notificationServiceFunction`       | Private          | EventBridge / REST `/student/notifications*` | Internal notification service; REST routes act only on the caller's own notifications |
@@ -401,7 +420,7 @@ const lambdaStudentFunction = new lambda.Function(this, `${id}-studentFunction`,
 | `instructorLambdaAuthorizer`        | Private (VPC)    | API Gateway Lambda Authorizer (instructor) | Internal to **API Gateway**; validates JWT + DB role lookup |
 | `WsAuthorizer`                      | Private (VPC)    | API Gateway WebSocket Authorizer ($connect)| Internal to **API Gateway**; validates JWT + DB user lookup |
 
-All AI functions also require the caller to have accepted the active disclaimer and enforce the daily message limit before calling Bedrock.
+All AI functions, including audio transcription, require the caller to have accepted the active disclaimer and enforce the daily message limit before calling Bedrock.
 
 ## 9. Cognito User Authentication
 
@@ -591,6 +610,29 @@ The student authorizer includes additional route-level logic:
 
 All authorizers implement a re-fetch mechanism: if the cached user metadata does not include the required role, the authorizer queries the database a second time with `forceRefresh` before denying access. This prevents false rejections when roles are updated by an admin while the authorizer Lambda is warm.
 
+#### Defense in Depth
+
+- API Gateway caches each authorizer decision for 60 seconds, so a removed role stops working within about a minute
+- The student handler repeats the authorizer's route rule (`utils/studentRoutes.js`), so a mistake in the authorizer cannot expose `/student/*` routes to other roles. A unit test checks that the two route lists match
+- No role in the identity pool holds `execute-api:Invoke`; every API method uses a Lambda authorizer and none uses IAM (SigV4) authentication
+
+#### Role Change Controls
+
+All role changes, from `PUT /admin/user_role`, `POST /admin/elevate_instructor` and `POST /admin/lower_instructor`, run through one transactional path (`utils/applyRoleChanges.js`) that locks the user row and every admin row, then applies the policy in `utils/roleChange.js`:
+
+- Nobody can add or remove the `admin` role on their own account, and nobody can grant themselves the `instructor` role. Removing your own `instructor` role is allowed.
+- An administrator cannot assign themselves as an instructor to a student (`POST /admin/assign_instructor_to_student`).
+- The last administrator cannot be removed, and a user's only role cannot be removed.
+- Granting or removing the `admin` or `instructor` role through `PUT /admin/user_role`, and elevating a user through `POST /admin/elevate_instructor`, are published to the security alerts topic as well as written to `audit_log`.
+
+#### Case Workflow Controls
+
+- Feedback (`PUT /instructor/send_feedback`) is accepted only from a reviewer the student selected for the case, and only while the case is submitted for review. The message and the move to `reviewed` are saved in one transaction.
+- Only `in_progress` cases can be archived, so archiving and unarchiving cannot reset a submitted or reviewed case.
+- Case fields changed through `PUT /student/edit_case` are screened with the same Bedrock guardrail as case creation, with length limits, and the request fails closed if screening is unavailable.
+- A block is marked complete only when the model's score is 5 and the student has at least 3 substantive turns in that section, counted by the function and not by the model.
+
+
 #### Context Passed to Downstream Handlers
 
 ```json
@@ -636,7 +678,7 @@ API Gateway WebSocket API enables real-time, bidirectional communication for fea
   5. On failure, returns an explicit Deny policy
 - The authorizer runs in the VPC with database connectivity via RDS Proxy
 - Downstream WebSocket handlers (`$connect`, `$default`) receive the database `userId` from the authorizer context, decoupled from the IDP
-- Role-based access checks for privileged actions (e.g., playground features) are performed by the `$default` handler using the `roles` context field
+- Role-based access checks are performed by the `$default` handler using the `roles` context field: playground actions require the `admin` or `instructor` role, and `generate_summary` requires the `student` role
 
 **Connection Management:**
 
@@ -653,7 +695,7 @@ API Gateway WebSocket API enables real-time, bidirectional communication for fea
 | **Control**                   | **Mechanism**                                                                  | **Purpose**                                                              |
 | ----------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | **Authentication**            | JWT validation + database user lookup in WebSocket Lambda authorizer            | Only authenticated, database-registered users can connect                |
-| **Authorization**             | Database role checks in `$default` handler using authorizer context             | Restricts privileged actions (playground) to admin/instructor roles       |
+| **Authorization**             | Database role checks in `$default` handler using authorizer context             | Restricts playground features to admin/instructor roles and summary generation to the student role |
 | **Identity Resolution**       | `idpId` → `userId` database lookup in authorizer                               | Decouples WebSocket identity from IDP, uses database UUID                |
 | **Connection Limits**         | Per-user max 5 concurrent connections                                          | Prevents connection exhaustion abuse                                     |
 | **Invocation Scoping**        | Scoped `lambda:InvokeFunction` permissions                                     | Prevents unauthorized backend function invocation                        |

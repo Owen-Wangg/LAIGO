@@ -7,6 +7,7 @@ const {
 } = require("./utils/utils");
 const { PERMISSION_MODELS, authorizeCaseAccess } = require("./utils/authorization");
 const { deleteChatHistory } = require("./utils/deleteChatHistory");
+const { recordAudit } = require("./utils/audit");
 const { parsePagination } = require("./utils/pagination");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "InstructorFunction" });
@@ -171,25 +172,45 @@ const routes = {
         return;
       }
 
-      // Get student_id and case_title from the case
-      const caseResult = await sqlConnection`
-            SELECT c.student_id, c.case_title
-            FROM "cases" c
-            WHERE c.case_id = ${case_id};
-          `;
+      // Lock the case and require that it is awaiting review and that the
+      // caller is one of the reviewers the student selected, the same
+      // conditions cases_to_review applies. The message and the status change
+      // are written together so neither can happen without the other.
+      const outcome = await sqlConnection.begin(async (sql) => {
+        const caseResult = await sql`
+              SELECT c.student_id, c.case_title, c.status, c.sent_to_review
+              FROM "cases" c
+              WHERE c.case_id = ${case_id}
+              FOR UPDATE;
+            `;
 
-      if (caseResult.length === 0) {
-        response.statusCode = 404;
-        response.body = JSON.stringify({
-          error: "Case not found",
-        });
-        return;
-      }
-      const student_id = caseResult[0].student_id;
-      const case_title = caseResult[0].case_title;
+        if (caseResult.length === 0) {
+          return { error: 404, message: "Case not found" };
+        }
 
-      // Insert message
-      await sqlConnection`
+        const assigned = await sql`
+              SELECT 1 FROM "case_reviewers"
+              WHERE case_id = ${case_id} AND reviewer_id = ${user_id};
+            `;
+
+        if (assigned.length === 0) {
+          return {
+            error: 403,
+            message: "You are not an assigned reviewer for this case",
+          };
+        }
+
+        if (
+          caseResult[0].status !== "submitted" ||
+          caseResult[0].sent_to_review !== true
+        ) {
+          return {
+            error: 409,
+            message: "Feedback can only be sent for a case submitted for review",
+          };
+        }
+
+        await sql`
               INSERT INTO "messages" (
                   message_id, 
                   instructor_id, 
@@ -203,16 +224,30 @@ const routes = {
                   ${case_id}, 
                   CURRENT_TIMESTAMP
               );
-          `;
+            `;
 
-      // Update case status
-      await sqlConnection`
-            UPDATE "cases"
-            SET 
-              sent_to_review = false,
-              status = 'reviewed'
-            WHERE case_id = ${case_id};
-          `;
+        await sql`
+              UPDATE "cases"
+              SET 
+                sent_to_review = false,
+                status = 'reviewed',
+                time_reviewed = CURRENT_TIMESTAMP
+              WHERE case_id = ${case_id};
+            `;
+
+        return {
+          student_id: caseResult[0].student_id,
+          case_title: caseResult[0].case_title,
+        };
+      });
+
+      if (outcome.error) {
+        response.statusCode = outcome.error;
+        response.body = JSON.stringify({ error: outcome.message });
+        return;
+      }
+
+      const { student_id, case_title } = outcome;
 
       // Publish feedback notification event using database user_ids
       await publishFeedbackNotificationEvent(
@@ -442,6 +477,12 @@ const routes = {
         throw new Error("TABLE_NAME is not configured");
       }
 
+      // Capture who owned the case before it is destroyed. Case content is
+      // privileged and is deliberately not copied into the audit record.
+      const deletedCase = await sqlConnection`
+            SELECT student_id FROM "cases" WHERE case_id = ${deleteCaseId};
+          `;
+
       // Remove privileged AI chat content before deleting the case record
       await deleteChatHistory(tableName, deleteCaseId);
 
@@ -449,6 +490,15 @@ const routes = {
       await sqlConnection`
             DELETE FROM "cases" WHERE case_id = ${deleteCaseId};
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: user.user_id,
+        actorEmail: user.email,
+        action: "case.delete",
+        subjectType: "case",
+        subjectId: deleteCaseId,
+        before: { student_id: deletedCase[0]?.student_id ?? null },
+      });
 
       response.body = JSON.stringify({
         message: "Case deleted successfully",
@@ -483,12 +533,22 @@ const routes = {
         return;
       }
 
-      // Archive case
-      await sqlConnection`
+      // Only a case still being worked on can be archived. Unarchiving resets
+      // a case to in_progress, so archiving a submitted or reviewed case would
+      // erase its review state.
+      const archived = await sqlConnection`
             UPDATE "cases"
             SET status = 'archived'
-            WHERE case_id = ${archiveCaseId};
+            WHERE case_id = ${archiveCaseId} AND status = 'in_progress'
+            RETURNING case_id;
           `;
+      if (archived.length === 0) {
+        response.statusCode = 409;
+        response.body = JSON.stringify({
+          error: "Only in-progress cases can be archived.",
+        });
+        return;
+      }
 
       response.body = JSON.stringify({
         message: "Case archived successfully",
@@ -584,6 +644,14 @@ const routes = {
       await sqlConnection`
             DELETE FROM "messages" WHERE message_id = ${deleteMessageId};
           `;
+
+      await recordAudit(sqlConnection, {
+        actorId: instructorId,
+        actorEmail: user.email,
+        action: "feedback.delete",
+        subjectType: "feedback",
+        subjectId: deleteMessageId,
+      });
 
       response.body = JSON.stringify({
         message: "Feedback deleted successfully",

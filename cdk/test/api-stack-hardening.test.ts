@@ -1,3 +1,5 @@
+import * as fs from "fs";
+import * as path from "path";
 import * as cdk from "aws-cdk-lib";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import { Template, Match } from "aws-cdk-lib/assertions";
@@ -6,6 +8,12 @@ import { DatabaseStack } from "../lib/database-stack";
 import { VpcStack } from "../lib/vpc-stack";
 
 const testEnv = { account: "111122223333", region: "us-east-1" };
+// Synthesize with the feature flags from cdk.json, as a real deploy does. Some
+// flags change what constructs create (for example CDK-managed Lambda log
+// groups), so code that adds constructs must be tested under them.
+const cdkJsonContext: Record<string, unknown> = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "../cdk.json"), "utf8"),
+).context;
 
 function synthApiStack(options: {
   environment?: string;
@@ -16,8 +24,8 @@ function synthApiStack(options: {
   const app = new cdk.App({
     context:
       options.environment === undefined
-        ? {}
-        : { Environment: options.environment },
+        ? { ...cdkJsonContext }
+        : { ...cdkJsonContext, Environment: options.environment },
   });
   const vpc = new VpcStack(app, "TestVpc", {
     env: testEnv,
@@ -79,6 +87,64 @@ describe("ApiGatewayStack production hardening", () => {
     });
   });
 
+  test("the student function can screen edited case content with the guardrail", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "TestApiStack-studentFunction",
+      Environment: {
+        Variables: Match.objectLike({
+          GUARDRAIL_ID: Match.anyValue(),
+          GUARDRAIL_VERSION: Match.anyValue(),
+        }),
+      },
+    });
+    const serialized = JSON.stringify(template.toJSON());
+    expect(serialized).toContain("bedrock:ApplyGuardrail");
+  });
+  test("every Lambda function has a log group with bounded retention", () => {
+    const functions = Object.keys(
+      template.findResources("AWS::Lambda::Function"),
+    );
+    // CDK names these groups /aws/lambda/<function name>, so the name is a
+    // CloudFormation expression rather than a plain string.
+    const functionLogGroups = Object.values(
+      template.findResources("AWS::Logs::LogGroup"),
+    ).filter((group) =>
+      JSON.stringify(group.Properties?.LogGroupName ?? "").includes(
+        "/aws/lambda/",
+      ),
+    );
+    expect(functions.length).toBeGreaterThan(0);
+    expect(functionLogGroups).toHaveLength(functions.length);
+    for (const group of functionLogGroups) {
+      expect(group.Properties.RetentionInDays).toBeGreaterThan(0);
+    }
+  });
+  test("no IAM policy grants execute-api:Invoke to identity pool users", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const grantsInvoke = Object.values(policies).some((policy) =>
+      JSON.stringify(policy.Properties?.PolicyDocument).includes(
+        "execute-api:Invoke",
+      ),
+    );
+    expect(grantsInvoke).toBe(false);
+  });
+  test("the audio transcription function can read the daily message limit", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "TestApiStack-audioToTextFunc",
+      Environment: {
+        Variables: Match.objectLike({
+          MESSAGE_LIMIT_PARAM: Match.anyValue(),
+        }),
+      },
+    });
+  });
+  test("API access logs record the authorizer principal", () => {
+    template.hasResourceProperties("AWS::ApiGateway::Stage", {
+      AccessLogSetting: {
+        Format: Match.stringLikeRegexp("principalId"),
+      },
+    });
+  });
   test("Bedrock model-invocation logging disables prompt/completion text delivery", () => {
     const serialized = JSON.stringify(template.toJSON());
     expect(serialized).toContain('textDataDeliveryEnabled\\":false');
@@ -275,5 +341,21 @@ describe("ApiGatewayStack security alert subscription", () => {
         securityAlertEmail: "not-an-email",
       }),
     ).toThrow(/securityAlertEmail must be a valid email address/);
+  });
+
+  test("the presigned upload function can read the file size limit it enforces", () => {
+    const api = synthApiStack({
+      environment: "prod",
+      frontendOrigin: "https://app.example.com",
+    });
+    const template = Template.fromStack(api);
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "TestApiStack-GeneratePreSignedURLFunction",
+      Environment: {
+        Variables: Match.objectLike({
+          FILE_SIZE_LIMIT_PARAM: Match.anyValue(),
+        }),
+      },
+    });
   });
 });

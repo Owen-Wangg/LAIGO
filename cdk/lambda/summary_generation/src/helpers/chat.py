@@ -47,7 +47,8 @@ except ImportError:
         ]
         for pat in injection_patterns:
             if re.search(pat, sanitized):
-                logger.warning("Prompt injection pattern detected in user input (first 100 chars): %.100s", sanitized)
+                # Log the input length only; the input is privileged client content.
+                logger.warning("Prompt injection pattern detected in user input (input length: %d)", len(sanitized))
                 return (sanitized, True)
         return (sanitized, False)
 
@@ -158,7 +159,7 @@ def _invoke_model_text(llm: dict, system_prompt: str, user_prompt: str) -> str:
     result = _extract_response_text(llm["model_id"], payload)
     logger.info("Model response received", extra={"responseLength": len(result)})
     if not result:
-        logger.warning(f"Empty model response. Payload keys: {list(payload.keys())}, payload preview: {json.dumps(payload)[:500]}")
+        logger.warning(f"Empty model response. Payload keys: {list(payload.keys())}")
     return result
 
 

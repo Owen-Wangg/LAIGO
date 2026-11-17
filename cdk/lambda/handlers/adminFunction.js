@@ -11,55 +11,9 @@ const {
   computeWhitelistReconciliation,
 } = require("./utils/whitelistUpload");
 const { Logger } = require("@aws-lambda-powertools/logger");
+const { recordAudit } = require("./utils/audit");
 const logger = new Logger({ serviceName: "AdminFunction" });
 
-/**
- * Persist a durable record of a security-critical administrative change.
- *
- * Writes one row to audit_log capturing the acting user, the affected subject,
- * and the before/after state. Failures here are logged but never propagated:
- * an audit write must not break the underlying mutation it accompanies.
- *
- * @param {Function} sqlConnection - postgres tagged-template connection
- * @param {Object} entry
- * @param {string} [entry.actorId] - acting user's id
- * @param {string} [entry.actorEmail] - acting user's email
- * @param {string} entry.action - machine-readable action name
- * @param {string} [entry.subjectType] - type of the affected subject
- * @param {string} [entry.subjectId] - id of the affected subject
- * @param {string} [entry.subjectEmail] - email of the affected subject
- * @param {*} [entry.before] - state before the change (serialized to jsonb)
- * @param {*} [entry.after] - state after the change (serialized to jsonb)
- */
-async function recordAudit(sqlConnection, entry) {
-  try {
-    const before =
-      entry.before === undefined || entry.before === null
-        ? null
-        : JSON.stringify(entry.before);
-    const after =
-      entry.after === undefined || entry.after === null
-        ? null
-        : JSON.stringify(entry.after);
-
-    await sqlConnection`
-      INSERT INTO audit_log (
-        actor_id, actor_email, action,
-        subject_type, subject_id, subject_email,
-        before_state, after_state
-      ) VALUES (
-        ${entry.actorId ?? null}, ${entry.actorEmail ?? null}, ${entry.action},
-        ${entry.subjectType ?? null}, ${entry.subjectId ?? null}, ${entry.subjectEmail ?? null},
-        ${before}::jsonb, ${after}::jsonb
-      );
-    `;
-  } catch (err) {
-    logger.error("Failed to write audit record", {
-      action: entry?.action,
-      errorMessage: err?.message,
-    });
-  }
-}
 
 const {
   SSMClient,
@@ -67,7 +21,8 @@ const {
   PutParameterCommand,
 } = require("@aws-sdk/client-ssm");
 
-const { evaluateRoleChange } = require("./utils/roleChange");
+const { applyRoleChanges } = require("./utils/applyRoleChanges");
+
 const { parsePagination } = require("./utils/pagination");
 const {
   validateMessageLimit,
@@ -360,6 +315,16 @@ const routes = {
           return;
         }
 
+        // Separation of duties: the roster row grants access to the student's
+        // cases, so an administrator cannot assign themselves as the instructor.
+        if (instructor_id === env.user_id) {
+          response.statusCode = 403;
+          response.body = JSON.stringify({
+            error: "You cannot assign yourself as an instructor.",
+          });
+          return;
+        }
+
         // Prevent self-assignment (a user with both roles assigning themselves)
         if (instructor_id === student.user_id) {
           response.statusCode = 400;
@@ -555,64 +520,16 @@ const routes = {
 
       const userIdToUpdate = existingUser[0].user_id;
 
-      // Run the admin-count check and the role update in a single transaction,
-      // locking the target row and every admin row, so the admin count cannot
-      // change between the decision and the write. This closes the race where
-      // two concurrent removals could each see a safe count and together drop
-      // the last administrator.
-      let decision;
-      let currentRoles = [];
-      await sqlConnection.begin(async (sql) => {
-        const lockedUser = await sql`
-              SELECT roles FROM "users" WHERE user_id = ${userIdToUpdate} FOR UPDATE;
-            `;
-        currentRoles = lockedUser[0]?.roles || [];
-
-        const adminRows = await sql`
-              SELECT user_id FROM "users" WHERE 'admin' = ANY(roles) FOR UPDATE;
-            `;
-        const totalAdminCount = adminRows.length;
-
-        decision = evaluateRoleChange({
-          currentRoles,
-          operation,
-          role,
-          actorUserId: env.user_id,
+      // Check the policy and apply the change in one locked transaction so the
+      // admin count cannot change between the decision and the write.
+      const { decision, rolesBefore: currentRoles } = await applyRoleChanges(
+        sqlConnection,
+        {
           targetUserId: userIdToUpdate,
-          totalAdminCount,
-        });
-
-        // Not permitted: make no changes and let the transaction commit the
-        // read-only locks. The response is derived from `decision` below.
-        if (!decision.allowed) {
-          return;
-        }
-
-        if (operation === "add") {
-          // Append role only if not already present
-          if (!currentRoles.includes(role)) {
-            await sql`
-                  UPDATE "users"
-                  SET roles = array_append(roles, ${role}::user_role)
-                  WHERE user_id = ${userIdToUpdate};
-                `;
-          }
-        } else {
-          await sql`
-                UPDATE "users"
-                SET roles = array_remove(roles, ${role}::user_role)
-                WHERE user_id = ${userIdToUpdate};
-              `;
-
-          // Clean up instructor assignments when instructor role is removed
-          if (role === "instructor") {
-            await sql`
-                  DELETE FROM "instructor_students"
-                  WHERE instructor_id = ${userIdToUpdate};
-                `;
-          }
-        }
-      });
+          actorUserId: env.user_id,
+          changes: [{ operation, role }],
+        },
+      );
 
       if (!decision.allowed) {
         response.statusCode = decision.statusCode;
@@ -633,9 +550,9 @@ const routes = {
         after: { roles: rolesAfter },
       });
 
-      // Surface changes to admin access on the security channel so a grant or
-      // removal of the admin role is never silent.
-      if (role === "admin") {
+      // Surface changes to admin and instructor access on the security channel
+      // so a grant or removal of either role is never silent.
+      if (role === "admin" || role === "instructor") {
         await notifySecurityEvent({
           action: "user_role.update",
           actorId: env.user_id,
@@ -1360,9 +1277,9 @@ const routes = {
     }
   },
   "POST /admin/file_size_limit": async (event, env) => {
-    const { response } = env;
+    const { response, sqlConnection } = env;
     try {
-      const { SSMClient, PutParameterCommand } =
+      const { SSMClient, GetParameterCommand, PutParameterCommand } =
         await import("@aws-sdk/client-ssm");
       const ssm = new SSMClient();
 
@@ -1384,6 +1301,16 @@ const routes = {
         return;
       }
 
+      let previousValue = null;
+      try {
+        const current = await ssm.send(
+          new GetParameterCommand({ Name: process.env.FILE_SIZE_LIMIT }),
+        );
+        previousValue = current.Parameter?.Value ?? null;
+      } catch {
+        previousValue = null;
+      }
+
       await ssm.send(
         new PutParameterCommand({
           Name: process.env.FILE_SIZE_LIMIT,
@@ -1392,6 +1319,15 @@ const routes = {
           Type: "String",
         }),
       );
+
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "file_size_limit.update",
+        subjectType: "file_size_limit",
+        before: previousValue === null ? null : { value: previousValue },
+        after: { value: String(newValue) },
+      });
 
       response.statusCode = 200;
       response.body = JSON.stringify({ success: true, value: newValue });
@@ -1623,6 +1559,15 @@ const routes = {
             WHERE disclaimer_id = ${disclaimer_id};
           `;
 
+      await recordAudit(sqlConnection, {
+        actorId: env.user_id,
+        actorEmail: env.user?.email,
+        action: "disclaimer.delete",
+        subjectType: "disclaimer",
+        subjectId: disclaimer_id,
+        before: { is_active: false },
+      });
+
       response.body = JSON.stringify({
         message: "Disclaimer deleted successfully",
       });
@@ -1723,16 +1668,24 @@ const routes = {
           return;
         }
 
-        // User is a student - elevate to instructor in database only
-        const newRoles = userRoles.map((role) =>
-          role === "student" ? "instructor" : role,
+        // Add the instructor role through the guarded role-change path. The
+        // existing roles are kept, matching PUT /admin/user_role.
+        const { decision, rolesBefore } = await applyRoleChanges(
+          sqlConnection,
+          {
+            targetUserId: existingUser[0].user_id,
+            actorUserId: env.user_id,
+            changes: [{ operation: "add", role: "instructor" }],
+          },
         );
 
-        await sqlConnection`
-              UPDATE "users"
-              SET roles = ${newRoles}
-              WHERE user_email = ${instructorEmail};
-            `;
+        if (!decision.allowed) {
+          response.statusCode = decision.statusCode;
+          response.body = JSON.stringify({ error: decision.error });
+          return;
+        }
+
+        const newRoles = decision.rolesAfter;
 
         await recordAudit(sqlConnection, {
           actorId: env.user_id,
@@ -1741,8 +1694,17 @@ const routes = {
           subjectType: "user",
           subjectId: existingUser[0].user_id,
           subjectEmail: instructorEmail,
-          before: { roles: userRoles },
+          before: { roles: rolesBefore },
           after: { roles: newRoles },
+        });
+
+        await notifySecurityEvent({
+          action: "user_role.elevate_instructor",
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          subjectId: existingUser[0].user_id,
+          subjectEmail: instructorEmail,
+          detail: { operation: "add", role: "instructor", rolesAfter: newRoles },
         });
 
         response.statusCode = 200;
@@ -1786,23 +1748,28 @@ const routes = {
           return;
         }
 
-        // Replace 'instructor' with 'student'
-        const updatedRoles = userRoles
-          .filter((role) => role !== "instructor")
-          .concat("student");
+        // Replace 'instructor' with 'student' through the guarded role-change
+        // path. Adding student first keeps the user from ever holding no role.
+        // Removing instructor also deletes their instructor assignments.
+        const { decision, rolesBefore } = await applyRoleChanges(
+          sqlConnection,
+          {
+            targetUserId: user_id,
+            actorUserId: env.user_id,
+            changes: [
+              { operation: "add", role: "student" },
+              { operation: "remove", role: "instructor" },
+            ],
+          },
+        );
 
-        // Update the roles in the database
-        await sqlConnection`
-                    UPDATE "users"
-                    SET roles = ${updatedRoles}
-                    WHERE user_id = ${user_id};
-                  `;
+        if (!decision.allowed) {
+          response.statusCode = decision.statusCode;
+          response.body = JSON.stringify({ error: decision.error });
+          return;
+        }
 
-        // Remove from instructor_students table
-        await sqlConnection`
-      DELETE FROM "instructor_students"
-      WHERE instructor_id = ${user_id};
-    `;
+        const updatedRoles = decision.rolesAfter;
 
         await recordAudit(sqlConnection, {
           actorId: env.user_id,
@@ -1810,7 +1777,7 @@ const routes = {
           action: "user_role.lower_instructor",
           subjectType: "user",
           subjectId: user_id,
-          before: { roles: userRoles },
+          before: { roles: rolesBefore },
           after: { roles: updatedRoles },
         });
 
@@ -1922,7 +1889,7 @@ const routes = {
     }
   },
   "PUT /admin/message_limit": async (event, env) => {
-    const { response } = env;
+    const { response, sqlConnection } = env;
     console.log("Updating message limit");
     if (event.body) {
       try {
@@ -1943,6 +1910,17 @@ const routes = {
         }
 
         const ssmClient = new SSMClient();
+
+        let previousLimit = null;
+        try {
+          const current = await ssmClient.send(
+            new GetParameterCommand({ Name: MESSAGE_LIMIT }),
+          );
+          previousLimit = current.Parameter?.Value ?? null;
+        } catch {
+          previousLimit = null;
+        }
+
         const command = new PutParameterCommand({
           Name: MESSAGE_LIMIT,
           Value: String(limit),
@@ -1950,6 +1928,15 @@ const routes = {
           Overwrite: true,
         });
         await ssmClient.send(command);
+
+        await recordAudit(sqlConnection, {
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          action: "message_limit.update",
+          subjectType: "message_limit",
+          before: previousLimit === null ? null : { limit: previousLimit },
+          after: { limit: String(limit) },
+        });
         response.body = JSON.stringify({
           message: "Message limit updated successfully",
         });

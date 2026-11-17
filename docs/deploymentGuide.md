@@ -56,7 +56,7 @@ The `DomainName` context parameter lets you serve the frontend on your own domai
 
 - Configures Amplify to serve the frontend on your custom domain
 - Locks CORS `Access-Control-Allow-Origin` to `https://<DomainName>` across all API endpoints and the S3 audio and whitelist-upload buckets
-- Tightens the Content-Security-Policy `connect-src` directive to only allow your specific API and WebSocket endpoints
+- Tightens the Content-Security-Policy `connect-src` directive to only allow your specific API and WebSocket endpoints. Amplify serves the security headers as custom response headers on the app, and `script-src` is limited to `'self'` in every deployment
 - Local development uses the Vite dev server proxy (configured in `vite.config.ts`) to avoid CORS issues
 
 **Prerequisites:**

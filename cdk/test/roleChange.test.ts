@@ -76,6 +76,44 @@ describe("evaluateRoleChange", () => {
     });
   });
 
+  describe("separation of duties on instructor role", () => {
+    test("blocks a user granting themselves instructor", () => {
+      const result = evaluateRoleChange({
+        currentRoles: ["admin"],
+        operation: "add",
+        role: "instructor",
+        actorUserId: actor,
+        targetUserId: actor,
+        totalAdminCount: 1,
+      });
+      expect(result.allowed).toBe(false);
+      expect(result.statusCode).toBe(403);
+      expect(result.error).toMatch(/instructor/i);
+    });
+    test("allows granting instructor to a different user", () => {
+      const result = evaluateRoleChange({
+        currentRoles: ["student"],
+        operation: "add",
+        role: "instructor",
+        actorUserId: actor,
+        targetUserId: other,
+        totalAdminCount: 1,
+      });
+      expect(result.allowed).toBe(true);
+      expect(result.rolesAfter).toEqual(["student", "instructor"]);
+    });
+    test("allows a user dropping their own instructor role", () => {
+      const result = evaluateRoleChange({
+        currentRoles: ["student", "instructor"],
+        operation: "remove",
+        role: "instructor",
+        actorUserId: actor,
+        targetUserId: actor,
+        totalAdminCount: 2,
+      });
+      expect(result.allowed).toBe(true);
+    });
+  });
   describe("non-admin self changes", () => {
     test("allows a user changing a non-admin role on their own account", () => {
       const result = evaluateRoleChange({

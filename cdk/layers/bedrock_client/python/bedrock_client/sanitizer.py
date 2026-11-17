@@ -78,10 +78,12 @@ def sanitize_prompt_input(user_input: str) -> tuple[str, bool]:
     injection_detected = False
     for pattern, description in _INJECTION_PATTERNS:
         if pattern.search(sanitized):
+            # Log the pattern and input length only. The input is privileged
+            # client content and must not be written to logs.
             logger.warning(
-                "Prompt injection pattern detected: %s in user input (first 100 chars): %.100s",
+                "Prompt injection pattern detected: %s (input length: %d)",
                 description,
-                sanitized,
+                len(sanitized),
             )
             injection_detected = True
             break  # One detection is enough to flag

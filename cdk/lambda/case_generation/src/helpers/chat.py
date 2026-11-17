@@ -26,7 +26,8 @@ except ImportError:
         ]
         for pat in injection_patterns:
             if re.search(pat, sanitized):
-                logger.warning("Prompt injection pattern detected in user input (first 100 chars): %.100s", sanitized)
+                # Log the input length only; the input is privileged client content.
+                logger.warning("Prompt injection pattern detected in user input (input length: %d)", len(sanitized))
                 return (sanitized, True)
         return (sanitized, False)
 
@@ -229,7 +230,7 @@ def generate_case_title(
     # Trim the response to ensure it's not too long
     title = response_text.strip()[:100]
     
-    logger.info(f"Generated case title: {title}")
+    logger.info(f"Generated case title (length: {len(title)})")
     return title
 
 

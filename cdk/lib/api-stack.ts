@@ -464,17 +464,22 @@ export class ApiGatewayStack extends cdk.Stack {
         accessLogDestination: new apigateway.LogGroupLogDestination(
           accessLogGroup,
         ),
-        accessLogFormat: apigateway.AccessLogFormat.jsonWithStandardFields({
-          caller: true,
-          httpMethod: true,
-          ip: true,
-          protocol: true,
-          requestTime: true,
-          resourcePath: true,
-          responseLength: true,
-          status: true,
-          user: true,
-        }),
+        // Requests are authenticated by custom Lambda authorizers, so the IAM
+        // caller/user fields are empty. Record the authorizer principal (the
+        // database user id) to attribute each request.
+        accessLogFormat: apigateway.AccessLogFormat.custom(
+          JSON.stringify({
+            requestId: apigateway.AccessLogField.contextRequestId(),
+            requestTime: apigateway.AccessLogField.contextRequestTime(),
+            principalId: apigateway.AccessLogField.contextAuthorizerPrincipalId(),
+            ip: apigateway.AccessLogField.contextIdentitySourceIp(),
+            httpMethod: apigateway.AccessLogField.contextHttpMethod(),
+            resourcePath: apigateway.AccessLogField.contextResourcePath(),
+            protocol: apigateway.AccessLogField.contextProtocol(),
+            status: apigateway.AccessLogField.contextStatus(),
+            responseLength: apigateway.AccessLogField.contextResponseLength(),
+          }),
+        ),
         methodOptions: {
           "/*/*": {
             throttlingRateLimit: 100, // 100 requests per second
@@ -671,8 +676,10 @@ export class ApiGatewayStack extends cdk.Stack {
       redactedFields: [{ singleHeader: { Name: "authorization" } }],
     });
 
-    // Create single IAM role for all authenticated users
-    // Authorization is now handled by Lambda authorizers querying the database
+    // Create single IAM role for all authenticated users. It holds no API
+    // permissions: every API method is protected by a Lambda authorizer that
+    // checks the user's role against the database, none uses IAM (SigV4)
+    // auth, so no role in the identity pool needs execute-api:Invoke.
     const authenticatedRole = new iam.Role(this, `${id}-AuthenticatedRole`, {
       assumedBy: new iam.FederatedPrincipal(
         "cognito-identity.amazonaws.com",
@@ -688,22 +695,6 @@ export class ApiGatewayStack extends cdk.Stack {
       ),
     });
 
-    // Grant authenticated role permissions to invoke API Gateway endpoints
-    // Note: Actual authorization is enforced by Lambda authorizers and handlers
-    authenticatedRole.attachInlinePolicy(
-      new iam.Policy(this, `${id}-AuthenticatedPolicy`, {
-        statements: [
-          createPolicyStatement(
-            ["execute-api:Invoke"],
-            [
-              `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/prod/*/admin/*`,
-              `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/prod/*/instructor/*`,
-              `arn:aws:execute-api:${this.region}:${this.account}:${this.api.restApiId}/prod/*/student/*`,
-            ],
-          ),
-        ],
-      }),
-    );
 
     // --- IAM Roles (Least Privilege) ---
     // Instead of one shared role, each function group gets a dedicated role
@@ -1582,6 +1573,8 @@ export class ApiGatewayStack extends cdk.Stack {
           CASE_TYPES_PARAM: caseTypesParameter.parameterName,
           NOTIFICATION_EVENT_BUS_NAME: notificationEventBus.eventBusName,
           TABLE_NAME: `${id}-Conversation-Table`,
+          GUARDRAIL_ID: textGenGuardrail.attrGuardrailId,
+          GUARDRAIL_VERSION: textGenGuardrailVersion.attrVersion,
           ...corsEnv,
         },
         functionName: `${id}-studentFunction`,
@@ -1593,6 +1586,15 @@ export class ApiGatewayStack extends cdk.Stack {
 
     // Grant RDS Proxy connect permission to student function
     db.dbInstance.grantConnect(lambdaStudentFunction, "applicationUsername");
+
+    // Edited case content is screened with the same guardrail as case creation
+    lambdaStudentFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["bedrock:ApplyGuardrail"],
+        resources: [textGenGuardrail.attrGuardrailArn],
+      }),
+    );
 
     // Allow access to DynamoDB Table for reading chat history
     chatHistoryTable.grantReadData(lambdaStudentFunction);
@@ -2162,10 +2164,12 @@ export class ApiGatewayStack extends cdk.Stack {
     playgroundTable.grantReadData(assessProgressFunction);
     assessProgressFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // NOTE: No guardrail grant for assessProgressFunction (finding M5). It has
-    // no GUARDRAIL_ID/VERSION and never calls apply_guardrail — it only assesses
-    // conversation content already validated by the text_generation input
-    // guardrail at ingestion. Re-applying the PII-blocking guardrail here would
+    // NOTE: No guardrail grant for assessProgressFunction. It has no
+    // GUARDRAIL_ID/VERSION and never calls apply_guardrail — it only assesses
+    // conversation content already screened by the text_generation input
+    // guardrail at ingestion. Because that text is still untrusted, the function
+    // wraps each turn in a delimiter, and a block is completed only when the
+    // model score is backed by a minimum number of substantive student turns. Re-applying the PII-blocking guardrail here would
     // falsely block legitimate legal content (e.g. party names in prior AI
     // output, which is not output-guardrailed by design — see H1), so the unused
     // bedrock:*Guardrail grant is removed to keep least privilege.
@@ -2238,6 +2242,7 @@ export class ApiGatewayStack extends cdk.Stack {
           REGION: this.region,
           SM_DB_CREDENTIALS: db.secretPathUser.secretName,
           RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
+          FILE_SIZE_LIMIT_PARAM: fileSizeLimitParameter.parameterName,
           ...corsEnv,
         },
         functionName: `${id}-GeneratePreSignedURLFunction`,
@@ -2253,12 +2258,24 @@ export class ApiGatewayStack extends cdk.Stack {
       .defaultChild as lambda.CfnFunction;
     cfnGeneratePreSignedURL.overrideLogicalId("GeneratePreSignedURLFunc");
 
+    // Read the administrator-configured upload size limit
+    fileSizeLimitParameter.grantRead(generatePreSignedURL);
+
     // Grant the Lambda function minimal permissions for pre-signed URL signing
+    // and for the existing-object check (HeadObject needs s3:GetObject, and
+    // s3:ListBucket so a missing key reports 404 rather than 403).
     generatePreSignedURL.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["s3:PutObject"],
+        actions: ["s3:PutObject", "s3:GetObject"],
         resources: [audioStorageBucket.arnForObjects("*")],
+      }),
+    );
+    generatePreSignedURL.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:ListBucket"],
+        resources: [audioStorageBucket.bucketArn],
       }),
     );
 
@@ -2290,10 +2307,14 @@ export class ApiGatewayStack extends cdk.Stack {
           RDS_PROXY_ENDPOINT: db.rdsProxyEndpoint,
           REGION: this.region,
           FILE_SIZE_LIMIT_PARAM: fileSizeLimitParameter.parameterName,
+          MESSAGE_LIMIT_PARAM: messageLimitParameter.parameterName,
           ...corsEnv,
         },
       },
     );
+
+    // Read the daily per-user message limit shared by every AI function
+    messageLimitParameter.grantRead(audioToTextFunction);
 
     const cfnAudioToTextFunction = audioToTextFunction.node
       .defaultChild as lambda.CfnFunction;
@@ -2435,9 +2456,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // Grant access to Bedrock (using shared policy with specific model ARNs)
     summaryGenerationFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // NOTE: No guardrail grant for summaryGenerationFunction (finding M5). Same
-    // rationale as assessProgressFunction above — it summarizes already-validated
-    // conversation content, has no GUARDRAIL_ID/VERSION, and never calls
+    // NOTE: No guardrail grant for summaryGenerationFunction. Same rationale as
+    // assessProgressFunction above — it summarizes conversation content and case
+    // details that were already screened, at creation (case_generation) and on
+    // every edit (studentFunction), has no GUARDRAIL_ID/VERSION, and never calls
     // apply_guardrail. The unused bedrock:*Guardrail grant is removed (least
     // privilege); re-applying PII blocking here would falsely block legal names.
 
@@ -3227,5 +3249,29 @@ export class ApiGatewayStack extends cdk.Stack {
       description: "SNS Topic ARN for security alerts — subscribe email/Slack",
       exportName: `${id}-SecurityAlertsTopicArn`,
     });
+
+    // Bound how long every Lambda function's logs are kept. Without it, function
+    // logs never expire and outlive the case data they describe. Each function
+    // already has a CDK-managed log group named /aws/lambda/<function name>
+    // (@aws-cdk/aws-lambda:useCdkManagedLogGroup), so set retention and the
+    // removal policy on that group rather than adding a second one. Done last so
+    // every function defined above is covered, including ones added later.
+    const functionLogRetentionDays = isProd
+      ? logs.RetentionDays.THREE_MONTHS
+      : logs.RetentionDays.ONE_WEEK;
+    this.node
+      .findAll()
+      .filter((c): c is lambda.Function => c instanceof lambda.Function)
+      .forEach((fn) => {
+        const functionLogGroup = fn.logGroup;
+        if (!(functionLogGroup instanceof logs.LogGroup)) {
+          return;
+        }
+        (functionLogGroup.node.defaultChild as logs.CfnLogGroup).retentionInDays =
+          functionLogRetentionDays;
+        functionLogGroup.applyRemovalPolicy(
+          isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+        );
+      });
   }
 }

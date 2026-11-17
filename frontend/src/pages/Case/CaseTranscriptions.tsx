@@ -204,7 +204,8 @@ const CaseTranscriptions: React.FC = () => {
       `${import.meta.env.VITE_API_ENDPOINT}/student/generate_presigned_url?` +
         `audio_file_id=${encodeURIComponent(audioFileId)}&` +
         `file_name=${encodeURIComponent(fileName)}&` +
-        `file_type=${encodeURIComponent(fileType)}`,
+        `file_type=${encodeURIComponent(fileType)}&` +
+        `file_size=${audioFile.file.size}`,
       {
         method: "GET",
         headers: { Authorization: token, "Content-Type": "application/json" },

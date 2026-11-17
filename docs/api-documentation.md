@@ -105,7 +105,7 @@ Student endpoints require the user to have the `student` role in the database. T
 - `GET /student/get_messages`
 - `GET /student/file_size_limit`
 
-AI endpoints (`new_case`, `text_generation`, `assess_progress`, `generate_summary`) return `403` with `"code": "DISCLAIMER_NOT_ACCEPTED"` until the user accepts the active disclaimer, and each request counts toward the daily message limit.
+AI endpoints (`new_case`, `text_generation`, `assess_progress`, `generate_summary`, `audio_to_text`) return `403` with `"code": "DISCLAIMER_NOT_ACCEPTED"` until the user accepts the active disclaimer, and each request counts toward the daily message limit.
 
 ## Case Management
 
@@ -195,6 +195,9 @@ Update case details.
 - `jurisdiction` (array, required): Jurisdiction list
 - `province` (string, required): Province/Territory
 - `statute` (string, required): Relevant statute details
+
+Fields you change are screened with the same content guardrail as case creation, and an unchanged field is not re-screened. Returns `400` when a changed field is too long or is blocked by the guardrail, and `503` when screening is unavailable. Limits: `case_title` 200 characters, `case_description` 4000, `province` and `statute` 200 each, and `jurisdiction` up to 20 entries of 100 characters.
+
 
 **Response:** `200 OK`
 
@@ -287,6 +290,8 @@ Archive a case.
 
 **Query Parameters:**
 - `case_id` (string, required): The case ID
+
+Only a case with status `in_progress` can be archived; any other status returns `409`. A submitted or reviewed case keeps its review state because unarchiving resets a case to `in_progress`.
 
 **Response:** `200 OK`
 
@@ -539,6 +544,8 @@ Assess student progress and potentially unlock the next block.
 - `reasoning` (string): Feedback addressing the user directly
 - `unlocked` (boolean): Whether the next block was unlocked
 
+A block is unlocked only when the score is 5 and the student has contributed at least 3 substantive turns in that section. With fewer, the score is returned as 4 with feedback to continue.
+
 **Example (cURL):**
 ```bash
 curl -X POST "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/assess_progress" \
@@ -563,6 +570,8 @@ Generate a summary for a case block or full case.
 - `sub_route` (string, optional): The block type to summarize (default: `full-case`)
   - Block types: `intake-facts`, `legal-analysis`, `contrarian-analysis`, `policy-context`
   - `full-case`: Stitches together existing block summaries
+
+Only the case owner can generate a summary, and the caller needs the `student` role. Instructors read saved summaries with `GET /student/get_summaries`.
 
 **Response:**
 ```json
@@ -676,6 +685,10 @@ Generate an S3 presigned URL for audio file upload.
 - `audio_file_id` (string, required): Unique ID for the audio file
 - `file_name` (string, required): Name of the file
 - `file_type` (string, required): MIME type (e.g., `audio/mpeg`, `audio/wav`)
+- `file_size` (integer, required): Size of the file in bytes. It must not exceed the administrator-configured file size limit and is signed into the URL, so the upload must send a body of exactly this size.
+
+Returns `409` when an object already exists at the key and `413` when `file_size` exceeds the limit.
+
 
 **Response:**
 ```json
@@ -686,7 +699,7 @@ Generate an S3 presigned URL for audio file upload.
 
 **Example (cURL):**
 ```bash
-curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/generate_presigned_url?audio_file_id=uuid&file_name=interview.mp3&file_type=audio/mpeg" \
+curl -X GET "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/generate_presigned_url?audio_file_id=uuid&file_name=interview.mp3&file_type=audio/mpeg&file_size=1048576" \
   -H "Authorization: eyJraWQiOiJ..."
 ```
 ---
@@ -726,6 +739,8 @@ Trigger AWS Transcribe to transcribe an audio file.
 - `file_type` (string, required): File type (e.g., `mp3`, `wav`, `m4a`)
 - `case_title` (string, required): Title of the case
 - `case_id` (string, required): The case ID
+
+The uploaded file is validated (size and file signature) and a validated copy is transcribed. A request over the daily message limit returns `429` and the uploaded file is deleted.
 
 **Response:** `200 OK` (transcription starts asynchronously)
 
@@ -822,8 +837,7 @@ Get all instructors assigned to the authenticated student.
 
 **Endpoint:** `GET /student/instructors`
 
-**Query Parameters:**
-- `user_id` (string, required): The student's user ID
+The caller is taken from the authorization token, so the request takes no query parameters.
 
 **Response:**
 ```json
@@ -1217,6 +1231,9 @@ Send feedback on a student's case.
 
 **Response:** `200 OK`
 
+The caller must be one of the reviewers the student selected for the case, and the case must be submitted for review. Returns `403` when the caller is not an assigned reviewer and `409` when the case is not awaiting review. The message and the move to `reviewed` (with `time_reviewed` set) are saved together.
+
+
 **Example (cURL):**
 ```bash
 curl -X PUT "https://api-id.execute-api.us-east-1.amazonaws.com/prod/instructor/send_feedback?case_id=uuid&instructor_id=uuid" \
@@ -1260,6 +1277,8 @@ Archive a student's case.
 
 **Query Parameters:**
 - `case_id` (string, required): The ID of the case to archive
+
+Only a case with status `in_progress` can be archived; any other status returns `409`. A submitted or reviewed case keeps its review state because unarchiving resets a case to `in_progress`.
 
 **Response:**
 ```json
@@ -1386,6 +1405,9 @@ Add or remove a single role from a user.
 - `operation` (string, required): Either `add` or `remove`
 - `role` (string, required): Role to add/remove (`admin`, `instructor`, or `student`)
 
+A user cannot add the `admin` or `instructor` role to their own account, and cannot change their own `admin` role; these return `403`. Changes to the `admin` and `instructor` roles are sent to the security alerts topic.
+
+
 **Response:** `200 OK`
 
 **Example (cURL):**
@@ -1403,7 +1425,7 @@ curl -X PUT "https://api-id.execute-api.us-east-1.amazonaws.com/prod/admin/user_
 
 ### Elevate User to Instructor
 
-Replace an existing user's `student` role with `instructor`. The user must already exist in the database.
+Add the `instructor` role to an existing user, keeping their other roles. The user must already exist in the database. The change goes through the same locked, policy-checked transaction as `PUT /admin/user_role`.
 
 **Endpoint:** `POST /admin/elevate_instructor`
 
@@ -1440,6 +1462,8 @@ Create an instructor-student relationship.
   "student_id": "student-uuid"
 }
 ```
+
+An administrator cannot assign themselves as the instructor; the request returns `403`.
 
 **Response:** `200 OK`
 
@@ -2781,9 +2805,9 @@ All responses include security headers:
 
 ### Input Validation
 
-- Request bodies and query parameters are validated in the Lambda handlers (required fields, enum values, numeric bounds)
+- Required query and path parameters are checked by API Gateway before a request reaches a Lambda function, and missing ones return `400`. Request bodies and query parameters are also validated in the Lambda handlers (required fields, enum values, numeric bounds)
 - Object access is checked against case ownership or the instructor-student relationship (BOLA/IDOR protection)
-- Audio uploads are limited by the configurable file size limit
+- Audio uploads are limited by the configurable file size limit. The limit is checked, and the file size is signed into the upload URL, when the URL is issued, so S3 rejects a larger upload
 - User input to the AI functions passes through Bedrock Guardrails (PII and prompt-attack filters) and prompt-input sanitizing
 
 ## WebSocket API
@@ -2796,7 +2820,7 @@ For real-time streaming AI responses, notifications, and bidirectional communica
 - `ping`
 - `generate_text` (interview assistant chat)
 - `assess_progress`
-- `generate_summary`
+- `generate_summary` (student role required)
 - `audio_to_text`
 - `playground_test` and `playground_assess` (admin and instructor only)
 

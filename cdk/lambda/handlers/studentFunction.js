@@ -10,6 +10,14 @@ const { PERMISSION_MODELS, authorizeCaseAccess, authorizeObjectAccess } = requir
 const { validateReviewerAssignment } = require("./utils/reviewerAssignment");
 const { validateCaseStatusEdit } = require("./utils/caseStatusTransition");
 const { parsePagination } = require("./utils/pagination");
+const { recordAudit } = require("./utils/audit");
+const { isRouteAllowedForRoles } = require("./utils/studentRoutes");
+const {
+  getChangedCaseFields,
+  validateCaseFieldLengths,
+  buildScreeningText,
+  screenCaseContent,
+} = require("./utils/caseContent");
 const { Logger } = require("@aws-lambda-powertools/logger");
 const logger = new Logger({ serviceName: "StudentFunction" });
 let { MESSAGE_LIMIT, FILE_SIZE_LIMIT, TABLE_NAME } = process.env;
@@ -170,6 +178,13 @@ const routes = {
                     DELETE FROM "summaries"
                     WHERE summary_id = ${summaryId};
                 `;
+
+        await recordAudit(sqlConnection, {
+          actorId: user_id,
+          action: "summary.delete",
+          subjectType: "summary",
+          subjectId: summaryId,
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -1134,7 +1149,8 @@ const routes = {
 
         const allowedCaseTypes = await getAllowedCaseTypes();
         const existingCaseRows = await sqlConnection`
-              SELECT case_type, status
+              SELECT case_title, case_type, case_description, jurisdiction,
+                     province, statute, status
               FROM "cases"
               WHERE case_id = ${case_id}
               LIMIT 1;
@@ -1159,6 +1175,44 @@ const routes = {
         if (!statusCheck.allowed) {
           response.statusCode = statusCheck.statusCode;
           response.body = JSON.stringify({ error: statusCheck.error });
+          return;
+        }
+
+        // Case content is later placed into AI prompts, so edits get the same
+        // screening as case creation. Only changed fields are checked.
+        const changedFields = getChangedCaseFields(existingCaseRows[0], {
+          case_title,
+          case_type,
+          case_description,
+          jurisdiction,
+          province,
+          statute,
+        });
+
+        const lengthCheck = validateCaseFieldLengths(changedFields);
+        if (!lengthCheck.valid) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: lengthCheck.error });
+          return;
+        }
+
+        let screening;
+        try {
+          screening = await screenCaseContent(
+            buildScreeningText(changedFields),
+          );
+        } catch (screenErr) {
+          // Fail closed: never save content that could not be screened.
+          logger.error("Case content screening failed", screenErr);
+          response.statusCode = 503;
+          response.body = JSON.stringify({
+            error: "Service temporarily unavailable. Please try again later.",
+          });
+          return;
+        }
+        if (screening.blocked) {
+          response.statusCode = 400;
+          response.body = JSON.stringify({ error: screening.message });
           return;
         }
 
@@ -1214,6 +1268,13 @@ const routes = {
               DELETE FROM "audio_files"
               WHERE audio_file_id = ${audioFileId};
             `;
+
+        await recordAudit(sqlConnection, {
+          actorId: user_id,
+          action: "transcription.delete",
+          subjectType: "transcription",
+          subjectId: audioFileId,
+        });
 
         response.statusCode = 200;
         response.body = JSON.stringify({
@@ -1419,11 +1480,22 @@ const routes = {
           return;
         }
 
-        await sqlConnection`
+        // Only a case still being worked on can be archived. Unarchiving
+        // resets a case to in_progress, so archiving a submitted or reviewed
+        // case would erase its review state.
+        const archived = await sqlConnection`
               UPDATE "cases"
               SET status = 'archived'
-              WHERE case_id = ${case_id}; 
+              WHERE case_id = ${case_id} AND status = 'in_progress'
+              RETURNING case_id;
             `;
+        if (archived.length === 0) {
+          response.statusCode = 409;
+          response.body = JSON.stringify({
+            error: "Only in-progress cases can be archived.",
+          });
+          return;
+        }
         response.statusCode = 200;
         response.body = JSON.stringify({
           message: "Case Archived Successfully",
@@ -1610,6 +1682,19 @@ exports.handler = async (event, context) => {
 
   try {
     const pathData = event.httpMethod + " " + event.resource;
+
+    // Defense in depth: the authorizer already applies this rule, so a
+    // mistake there must not expose the student routes to other roles.
+    if (!isRouteAllowedForRoles(pathData, roles)) {
+      logger.warn("Access denied: roles do not permit this route", {
+        userId,
+        route: pathData,
+      });
+      response.statusCode = 403;
+      response.body = JSON.stringify({ error: "Forbidden" });
+      return response;
+    }
+
     const env = {
       event,
       response,

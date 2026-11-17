@@ -323,6 +323,22 @@ exports.handler = async (event, context) => {
     if (action === "generate_summary") {
       const { case_id, sub_route } = body;
 
+      // RBAC Check: generating a summary writes to the case, which the REST
+      // route allows only to the student role. The socket authorizer checks no
+      // role at connect time, so enforce the same rule here.
+      if (!user.roles.includes("student")) {
+        logger.warn("Unauthorized summary generation attempt", {
+          userId,
+          roles: user.roles,
+        });
+        return {
+          statusCode: 403,
+          body: JSON.stringify({
+            error: "Forbidden: Student access required",
+          }),
+        };
+      }
+
       console.log("Invoking generate_summary:", {
         case_id,
         sub_route,

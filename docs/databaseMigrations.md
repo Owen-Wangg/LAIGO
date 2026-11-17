@@ -157,7 +157,7 @@ exports.up = (pgm) => {
 3. **Secrets Load**: The Lambda reads admin credentials from `DB_SECRET_NAME` in Secrets Manager
 4. **Migration Run**: `runMigrations()` executes `node-pg-migrate` in `up` direction against `migrations/` over TLS through the RDS Proxy
 5. **Tracking Update**: `node-pg-migrate` records applied files in `pgmigrations`
-6. **Post-Migration Setup**: The Lambda creates the `app_rw` and `app_tc` users if they are missing, re-applies the `readwrite` and `tablecreator` grants, makes `audit_log` append-only for those roles, and writes the credentials to the app secrets. Passwords already stored in the secrets are reused; a new password is only generated on first provisioning.
+6. **Post-Migration Setup**: The Lambda creates the `app_rw` and `app_tc` users if they are missing, re-applies the `readwrite` and `tablecreator` grants, makes `audit_log` append-only for those roles, limits `UPDATE` on `users.roles` to `tablecreator` (so only the admin handler can change roles), and writes the credentials to the app secrets. Passwords already stored in the secrets are reused; a new password is only generated on first provisioning.
 
 ### Migration Tracking
 

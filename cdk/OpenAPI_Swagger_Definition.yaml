@@ -15,8 +15,8 @@ x-amazon-apigateway-request-validators:
     validateRequestParameters: true
     validateRequestBody: true
   params-only:
-    validateRequestParameters": true
-    validateRequestBody": false
+    validateRequestParameters: true
+    validateRequestBody: false
 x-amazon-apigateway-request-validator: params-only
 x-amazon-apigateway-gateway-responses:
   UNAUTHORIZED:
@@ -98,7 +98,7 @@ components:
         type: token
         authorizerUri:
           Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${adminLambdaAuthorizer.Arn}/invocations
-        authorizerResultTtlInSeconds: 300
+        authorizerResultTtlInSeconds: 60
 
     instructorAuthorizer:
       type: apiKey
@@ -109,7 +109,7 @@ components:
         type: token
         authorizerUri:
           Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${instructorLambdaAuthorizer.Arn}/invocations
-        authorizerResultTtlInSeconds: 300
+        authorizerResultTtlInSeconds: 60
 
     studentAuthorizer:
       type: apiKey
@@ -120,7 +120,7 @@ components:
         type: token
         authorizerUri:
           Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${studentLambdaAuthorizer.Arn}/invocations
-        authorizerResultTtlInSeconds: 300
+        authorizerResultTtlInSeconds: 60
 
   responses:
     Success:
@@ -3838,12 +3838,6 @@ paths:
         - Student
       summary: Get instructors assigned to a student
       operationId: get_instructors_GET
-      parameters:
-        - in: query
-          name: user_id
-          required: true
-          schema:
-            type: string
       responses:
         "200":
           description: Instructors list
@@ -4334,6 +4328,13 @@ paths:
           required: true
           schema:
             type: string
+        - in: query
+          name: file_size
+          required: true
+          description: Size of the file in bytes. Signed into the upload URL.
+          schema:
+            type: integer
+            minimum: 1
       responses:
         "200":
           description: Presigned URL generated
