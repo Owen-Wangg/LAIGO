@@ -544,6 +544,8 @@ Assess student progress and potentially unlock the next block.
 - `reasoning` (string): Feedback addressing the user directly
 - `unlocked` (boolean): Whether the next block was unlocked
 
+A block is unlocked only when the score is 5 and the student has contributed at least 3 substantive turns in that section. With fewer, the score is returned as 4 with feedback to continue.
+
 **Example (cURL):**
 ```bash
 curl -X POST "https://api-id.execute-api.us-east-1.amazonaws.com/prod/student/assess_progress" \

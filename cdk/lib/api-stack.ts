@@ -2164,10 +2164,12 @@ export class ApiGatewayStack extends cdk.Stack {
     playgroundTable.grantReadData(assessProgressFunction);
     assessProgressFunction.addToRolePolicy(bedrockPolicyStatement);
 
-    // NOTE: No guardrail grant for assessProgressFunction (finding M5). It has
-    // no GUARDRAIL_ID/VERSION and never calls apply_guardrail — it only assesses
-    // conversation content already validated by the text_generation input
-    // guardrail at ingestion. Re-applying the PII-blocking guardrail here would
+    // NOTE: No guardrail grant for assessProgressFunction. It has no
+    // GUARDRAIL_ID/VERSION and never calls apply_guardrail — it only assesses
+    // conversation content already screened by the text_generation input
+    // guardrail at ingestion. Because that text is still untrusted, the function
+    // wraps each turn in a delimiter, and a block is completed only when the
+    // model score is backed by a minimum number of substantive student turns. Re-applying the PII-blocking guardrail here would
     // falsely block legitimate legal content (e.g. party names in prior AI
     // output, which is not output-guardrailed by design — see H1), so the unused
     // bedrock:*Guardrail grant is removed to keep least privilege.
