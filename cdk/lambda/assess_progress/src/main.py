@@ -366,7 +366,13 @@ def _strip_untrusted_tags(text):
 
 def _wrap_untrusted(content):
     """Neutralize message text and wrap it in the untrusted-content delimiter."""
-    cleaned = _strip_untrusted_tags(_neutralize_role_prefixes(content))
+    # Tags go first, after normalization (look-alike characters can normalize
+    # into a tag), so the marker checks see the text a reader would see. A
+    # marker split by a tag, such as "AI<untrusted_turn>:", is rejoined before
+    # it is checked. The final strip is a safeguard: neutralizing only adds
+    # quote prefixes, so nothing should be left to remove.
+    stripped = _strip_untrusted_tags(_normalize_untrusted_text(content))
+    cleaned = _strip_untrusted_tags(_neutralize_role_prefixes(stripped))
     return f"{_UNTRUSTED_OPEN}{cleaned}{_UNTRUSTED_CLOSE}"
 
 
