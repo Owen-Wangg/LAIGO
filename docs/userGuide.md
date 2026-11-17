@@ -113,11 +113,11 @@ Upon logging in as a supervisor, they will be greeted with a homepage that displ
 
 ![image](./media/supervisor-home-page.png)
 
-Supervisors have the ability to archive and delete their own cases, or their advocates cases by clicking on the ellipsis on a case:
+Supervisors have the ability to archive and delete their own cases, or their advocates cases by clicking on the ellipsis on a case. Only cases that are still In Progress can be archived; a case that has been submitted for review or reviewed cannot. An archived case can be unarchived, and it returns to In Progress:
 
 ![image](./media/supervisor-delete-archive-case.png)
 
-Upon clicking on any of the cases, the supervisor can see all interactions of the advocate with the AI Assistant as well as all the summaries, notes and transcriptions. The supervisor can then give feed back from the "Case Feedback" tab:
+Upon clicking on any of the cases, the supervisor can see all interactions of the advocate with the AI Assistant as well as all the summaries, notes and transcriptions. The supervisor can then give feed back from the "Case Feedback" tab. Feedback can only be sent by a supervisor the advocate chose as a reviewer when submitting the case, and only while the case is waiting for review. Sending feedback moves the case to Reviewed:
 ![image](./media/supervisor-feedback.png)
 
 ### Prompts
@@ -159,7 +159,7 @@ The Interview Assistant is divided into 4 stages, each focusing on a different a
 3. **Contrarian Analysis** — Explore counterarguments and weaknesses in your position. The AI challenges your reasoning to help you prepare for opposing perspectives.
 4. **Policy Context** — Consider the broader policy implications and societal context surrounding the case, helping you understand how your arguments fit within larger legal and social frameworks.
 
-Each stage has its own progress bar. As you interact with the AI and demonstrate thorough analysis, the progress bar fills up. All stages can be opened at any time from the side menu. When a stage is complete, its progress bar is replaced by a completion message and the stage shows a check mark in the side menu.
+Each stage has its own progress bar. As you interact with the AI and demonstrate thorough analysis, the progress bar fills up. All stages can be opened at any time from the side menu. When a stage is complete, its progress bar is replaced by a completion message and the stage shows a check mark in the side menu. A stage is only marked complete when the AI rates your analysis as complete and you have contributed at least three substantive messages of your own in that stage, so short or repeated requests will not unlock it.
 
 ![image](./media/advocate-interview-assistant.png)
 
@@ -169,7 +169,7 @@ Upon interacting with the AI Assistant, the advocate can choose to generate a do
 
 ![image](./media/advocate-case-summaries.png)
 
-The advocate can also navigate to the "Case Transcriptions" tab to upload audio and transcribe. Click on the "Upload Audio" button to upload an audio file, and when done, Transcriptions will be viewable and downloadable in the main page.
+The advocate can also navigate to the "Case Transcriptions" tab to upload audio and transcribe. Click on the "Upload Audio" button to upload an audio file, and when done, Transcriptions will be viewable and downloadable in the main page. Audio files must be within the file size limit set by your administrator, and each transcription counts toward your daily message limit.
 
 ![image](./media/advocate-transcriptions.png)
 

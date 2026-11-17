@@ -105,7 +105,7 @@ Student endpoints require the user to have the `student` role in the database. T
 - `GET /student/get_messages`
 - `GET /student/file_size_limit`
 
-AI endpoints (`new_case`, `text_generation`, `assess_progress`, `generate_summary`) return `403` with `"code": "DISCLAIMER_NOT_ACCEPTED"` until the user accepts the active disclaimer, and each request counts toward the daily message limit.
+AI endpoints (`new_case`, `text_generation`, `assess_progress`, `generate_summary`, `audio_to_text`) return `403` with `"code": "DISCLAIMER_NOT_ACCEPTED"` until the user accepts the active disclaimer, and each request counts toward the daily message limit.
 
 ## Case Management
 
@@ -571,6 +571,8 @@ Generate a summary for a case block or full case.
   - Block types: `intake-facts`, `legal-analysis`, `contrarian-analysis`, `policy-context`
   - `full-case`: Stitches together existing block summaries
 
+Only the case owner can generate a summary, and the caller needs the `student` role. Instructors read saved summaries with `GET /student/get_summaries`.
+
 **Response:**
 ```json
 {
@@ -737,6 +739,8 @@ Trigger AWS Transcribe to transcribe an audio file.
 - `file_type` (string, required): File type (e.g., `mp3`, `wav`, `m4a`)
 - `case_title` (string, required): Title of the case
 - `case_id` (string, required): The case ID
+
+The uploaded file is validated (size and file signature) and a validated copy is transcribed. A request over the daily message limit returns `429` and the uploaded file is deleted.
 
 **Response:** `200 OK` (transcription starts asynchronously)
 
@@ -2801,9 +2805,9 @@ All responses include security headers:
 
 ### Input Validation
 
-- Request bodies and query parameters are validated in the Lambda handlers (required fields, enum values, numeric bounds)
+- Required query and path parameters are checked by API Gateway before a request reaches a Lambda function, and missing ones return `400`. Request bodies and query parameters are also validated in the Lambda handlers (required fields, enum values, numeric bounds)
 - Object access is checked against case ownership or the instructor-student relationship (BOLA/IDOR protection)
-- Audio uploads are limited by the configurable file size limit
+- Audio uploads are limited by the configurable file size limit. The limit is checked, and the file size is signed into the upload URL, when the URL is issued, so S3 rejects a larger upload
 - User input to the AI functions passes through Bedrock Guardrails (PII and prompt-attack filters) and prompt-input sanitizing
 
 ## WebSocket API
@@ -2816,7 +2820,7 @@ For real-time streaming AI responses, notifications, and bidirectional communica
 - `ping`
 - `generate_text` (interview assistant chat)
 - `assess_progress`
-- `generate_summary`
+- `generate_summary` (student role required)
 - `audio_to_text`
 - `playground_test` and `playground_assess` (admin and instructor only)
 

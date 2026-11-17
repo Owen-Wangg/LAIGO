@@ -45,7 +45,7 @@ All Python Lambda functions share these common patterns:
 - **Cached globals** for secrets, parameters, and DB connections across warm invocations
 - **AWS Lambda Powertools** for structured logging and metrics (`Logger`, `Metrics`)
 - **Disclaimer gate**: `is_disclaimer_accepted` (in `helpers/usage.py`) blocks the request before any Bedrock call if the user has not accepted the active disclaimer. It fails closed if the check cannot run.
-- **Daily message limit**: `check_and_increment_usage` counts one message per request (including case creation, summaries, assessments, and playground requests) and rejects requests over the limit with `429` (or a WebSocket error)
+- **Daily message limit**: `check_and_increment_usage` counts one message per request (including case creation, summaries, assessments, audio transcription, and playground requests) and rejects requests over the limit with `429` (or a WebSocket error)
 - **Prompt-input sanitizing**: text generation, case generation, progress assessment, and playground generation use the shared `bedrock_client` layer (`cdk/layers/bedrock_client/`), which provides the Bedrock runtime client and sanitizes user input before it is interpolated into prompts. Summary generation creates its Bedrock client inline.
 
 ---
@@ -195,6 +195,7 @@ Automatically generates a case title based on inputs like case type, jurisdictio
 ### Guardrail Integration
 - Guardrail ID and version are passed via CDK environment variables
 - Input guardrails are applied to the combined case input before processing
+- Case fields changed later through `PUT /student/edit_case` (in `studentFunction.js`, not this Lambda) are screened with the same guardrail and length limits. Only the fields that changed are screened, and the edit is rejected if screening is unavailable
 - Detects sensitive information (PII) and blocks the request if found
 
 ---
@@ -215,7 +216,7 @@ Generates professional legal summaries from conversation history. Supports both 
     - Entry point supporting both HTTP and WebSocket streaming modes
     - Routes to either full-case summary or block-specific summary based on `sub_route`
     - Maps `sub_route` to `block_type`: `intake-facts` → `intake`, `legal-analysis` → `legal_analysis`, `contrarian-analysis` → `contrarian`, `policy-context` → `policy`
-    - Performs IDOR protection (case owner or instructor of the case owner can generate summaries)
+    - Performs IDOR protection (only the case owner can generate summaries; instructors read the saved summaries through `GET /student/get_summaries`)
     - Appends a legal disclaimer to all generated summaries
     - Publishes EventBridge notification events on success or failure
 
@@ -242,7 +243,7 @@ Generates professional legal summaries from conversation history. Supports both 
     - Event source: `notification.system`, detail type: `Summary Generation Complete`
 
 - `check_authorization(user_id, case_id)`:
-    - Verifies the user owns the case or is an instructor for the case owner
+    - Verifies the user owns the case. Generating a summary writes to the case, so an instructor of the case owner is not accepted
 
 - `send_to_websocket(connection_id, endpoint, request_id, msg_type, content, data)`:
     - Sends structured messages to a WebSocket connection with request correlation
@@ -316,7 +317,7 @@ Evaluates a student's progress within a specific interview block by analyzing th
     - Returns the stored messages as an ordered list of `{"role", "content"}` entries, taking each role from the stored message type rather than from the message text
 
 - `mark_block_completed(case_id, block_type)`:
-    - Adds the block type to the `completed_blocks` array in the `cases` table when progress reaches 5/5
+    - Adds the block type to the `completed_blocks` array in the `cases` table when the final progress is 5/5 (see Completion Check below)
     - Returns `True` if the block was successfully marked as completed
 
 - `check_authorization(user_id, case_id)`:
@@ -334,6 +335,9 @@ The LLM receives:
 - Progress scoring is based on human-authored effort; assistant-generated analysis or summaries cannot be counted as student work.
 - If human participation is mostly low-effort requests (for example, asking the assistant to "analyze" or "summarize" without substantive follow-up), a conservative score cap is applied.
 - This logic is applied consistently in both standard assessment mode and playground assessment mode.
+### Completion Check
+- The model's score is not enough on its own to complete a block. `_apply_completion_preconditions` lowers a score of 5 to 4 unless the student has at least 3 substantive turns (`MIN_SUBSTANTIVE_TURNS_FOR_COMPLETION`), counted by the function from the stored history.
+- Each verdict is logged with the model's score, the final score, and the substantive turn count, and each completion write is logged with the case, block, and user.
 
 ### Response Parsing
 - `_try_parse_assessment_json` tries, in order: the raw text as JSON, the text with Markdown code fences stripped, the span between the first `{` and last `}`, and a regex extraction of `progress` and `reasoning`
@@ -345,6 +349,7 @@ The LLM receives:
 - Stored chat roles come from the message type in DynamoDB, never from the message text
 - `_normalize_untrusted_text` applies Unicode NFKC normalization and strips invisible characters and look-alike whitespace
 - `_neutralize_role_prefixes` quotes (prefixes with `> `) any message line that imitates a turn marker (for example `AI: ...`) or an assessment section header, so student text cannot forge turns or scoring sections
+- `_wrap_untrusted` wraps every embedded turn in `<untrusted_turn>` tags after removing any copy of those tags from the text, and the system instructions tell the model to treat text inside the tags as evidence and never as instructions. `_neutralize_role_prefixes` also quotes lines that contain a turn marker or section header anywhere in the line, not only at the start
 
 ---
 

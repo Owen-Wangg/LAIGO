@@ -14,10 +14,10 @@
     - A **WebSocket API** (Streaming) that facilitates real-time, low-latency communication for chat interactions and live updates.
 
 4. **Audio processing workflow** – When a user initiates an audio upload:
-    1. A pre-signed URL is generated when the user uploads an audio file.
-    2. The pre-signed URL is stored in an **Amazon S3** bucket.
-    3. An **AWS Lambda** function monitors the bucket, retrieves the audio file, and prepares it for transcription processing.
-    4. **Amazon Transcribe** processes the uploaded audio file and converts it into text.
+    1. The client creates an audio record for the case, then requests a pre-signed URL. The URL is only issued if the declared file size is within the administrator's limit and no object exists at that key, and the size is signed into the URL.
+    2. The client uploads the file directly to the **Amazon S3** bucket with that URL, then asks for transcription.
+    3. An **AWS Lambda** function checks the daily message limit, validates the uploaded object (size and file signature), and copies exactly the validated bytes to a prefix that upload URLs cannot write to.
+    4. **Amazon Transcribe** transcribes the validated copy and the Lambda stores the text. Both S3 objects are deleted afterward, and a lifecycle rule removes anything left behind after 7 days.
 
 5. **Data persistence** – Metadata related to the audio file and its transcription, such as timestamps and case ID, alongside primary application data such as cases and users, is stored in an **Amazon RDS for PostgreSQL** (version 17) database. An **Amazon RDS Proxy** manages a high volume of concurrent connections and requires TLS. Chat history, notifications, WebSocket connections, prompt playground sessions, and the signup email whitelist are stored in **Amazon DynamoDB** tables.
 
@@ -192,7 +192,7 @@
 
 ##### `audit_log`
 
-Records administrative actions: role changes, instructor assignments, prompt and disclaimer changes, role label edits, AI configuration updates, signup mode changes, and whitelist changes. The table is append-only for the application database roles: `db_setup` revokes `UPDATE`, `DELETE`, and `TRUNCATE` on it from `readwrite` and `tablecreator` on every deploy.
+Records security-relevant changes: role changes, instructor assignments, prompt and disclaimer changes (including disclaimer deletion), role label edits, AI configuration updates, message limit and file size limit changes, signup mode changes, whitelist changes, and deletions of cases, feedback, summaries, and transcriptions (with the actor and the owning student, not the case content). The table is append-only for the application database roles: `db_setup` revokes `UPDATE`, `DELETE`, and `TRUNCATE` on it from `readwrite` and `tablecreator` on every deploy.
 
 | Column          | Description                                                        |
 | --------------- | ------------------------------------------------------------------ |
