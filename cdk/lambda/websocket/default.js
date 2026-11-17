@@ -252,6 +252,9 @@ exports.handler = async (event, context) => {
     if (action === "assess_progress") {
       const { case_id, block_type } = body;
 
+      const denied = requireStudent("progress assessment");
+      if (denied) return denied;
+
       console.log("Invoking assess_progress:", {
         case_id,
         block_type,

@@ -413,7 +413,7 @@ const lambdaStudentFunction = new lambda.Function(this, `${id}-studentFunction`,
 | `SummaryGenerationFunction`         | Private          | REST `GET /student/generate_summary`; WebSocket `generate_summary` | Case owner with the student role |
 | `audioToTextFunction`               | Private          | REST `GET /student/audio_to_text`; WebSocket `audio_to_text` | Case owner with the **student** role, on REST and on the WebSocket action |
 | `PlaygroundTextGenLambdaDockerFunc` | Private          | WebSocket `playground_test`                | Users with the **admin** or **instructor** role |
-| `AssessProgressFunction`            | Private          | REST `POST /student/assess_progress`; WebSocket `assess_progress` and `playground_assess` | Case owner; playground mode requires **admin** or **instructor** |
+| `AssessProgressFunction`            | Private          | REST `POST /student/assess_progress`; WebSocket `assess_progress` and `playground_assess` | Case owner with the **student** role; playground mode requires **admin** or **instructor** |
 | `notificationServiceFunction`       | Private          | EventBridge / REST `/student/notifications*` | Internal notification service; REST routes act only on the caller's own notifications |
 | `adminLambdaAuthorizer`             | Private (VPC)    | API Gateway Lambda Authorizer (admin)      | Internal to **API Gateway**; validates JWT + DB role lookup |
 | `studentLambdaAuthorizer`           | Private (VPC)    | API Gateway Lambda Authorizer (student)    | Internal to **API Gateway**; validates JWT + DB role lookup |

@@ -1,5 +1,5 @@
 // Verifies the WebSocket dispatcher applies the same role rule as REST to
-// generate_text, generate_summary and audio_to_text. The AWS SDK clients and logger are replaced with mocks.
+// generate_text, generate_summary, assess_progress and audio_to_text. The AWS SDK clients and logger are replaced with mocks.
 const mockSend = jest.fn().mockResolvedValue({});
 
 jest.mock(
@@ -37,6 +37,7 @@ const { handler } = require("../lambda/websocket/default");
 const studentActions: { action: string; extra: Record<string, unknown> }[] = [
   { action: "generate_text", extra: { case_id: "case-1", sub_route: "full-case", message_content: "hi" } },
   { action: "generate_summary", extra: { case_id: "case-1", sub_route: "full-case" } },
+  { action: "assess_progress", extra: { case_id: "case-1", block_type: "intake" } },
   { action: "audio_to_text", extra: { audio_file_id: "a-1", file_name: "a.wav", file_type: "wav", case_title: "t", case_id: "case-1" } },
 ];
 
@@ -62,6 +63,7 @@ describe.each(studentActions)("websocket $action role gate", ({ action, extra })
     process.env.TEXT_GEN_FUNCTION_NAME = "text-fn";
     process.env.SUMMARY_GEN_FUNCTION_NAME = "summary-fn";
     process.env.AUDIO_TO_TEXT_FUNCTION_NAME = "audio-fn";
+    process.env.ASSESS_PROGRESS_FUNCTION_NAME = "assess-fn";
   });
 
   test("rejects an instructor-only caller without invoking the function", async () => {
