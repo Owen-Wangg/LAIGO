@@ -15,8 +15,8 @@ x-amazon-apigateway-request-validators:
     validateRequestParameters: true
     validateRequestBody: true
   params-only:
-    validateRequestParameters": true
-    validateRequestBody": false
+    validateRequestParameters: true
+    validateRequestBody: false
 x-amazon-apigateway-request-validator: params-only
 x-amazon-apigateway-gateway-responses:
   UNAUTHORIZED:
@@ -3838,12 +3838,6 @@ paths:
         - Student
       summary: Get instructors assigned to a student
       operationId: get_instructors_GET
-      parameters:
-        - in: query
-          name: user_id
-          required: true
-          schema:
-            type: string
       responses:
         "200":
           description: Instructors list

@@ -831,8 +831,7 @@ Get all instructors assigned to the authenticated student.
 
 **Endpoint:** `GET /student/instructors`
 
-**Query Parameters:**
-- `user_id` (string, required): The student's user ID
+The caller is taken from the authorization token, so the request takes no query parameters.
 
 **Response:**
 ```json
