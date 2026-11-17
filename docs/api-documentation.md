@@ -2818,10 +2818,10 @@ For real-time streaming AI responses, notifications, and bidirectional communica
 
 **Actions** (sent as `{"action": "<name>", ...}`):
 - `ping`
-- `generate_text` (interview assistant chat)
+- `generate_text` (interview assistant chat; student role required)
 - `assess_progress`
 - `generate_summary` (student role required)
-- `audio_to_text`
+- `audio_to_text` (student role required)
 - `playground_test` and `playground_assess` (admin and instructor only)
 
 **WebSocket URL:**
