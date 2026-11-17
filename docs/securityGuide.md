@@ -407,13 +407,13 @@ const lambdaStudentFunction = new lambda.Function(this, `${id}-studentFunction`,
 | `adminFunction`                     | Private          | REST `/admin/*`                            | Users with the **admin** role               |
 | `preSignupLambda`                   | Private          | Cognito **Pre-Sign-Up** trigger            | **Cognito internal trigger** only           |
 | `addStudentOnSignUp`                | Private          | Cognito **Post-Confirmation** trigger      | **Cognito internal trigger** only           |
-| `TextGenLambdaDockerFunc`           | Private          | REST `POST /student/text_generation`; WebSocket `generate_text` | Case owner (the handler checks ownership) |
+| `TextGenLambdaDockerFunc`           | Private          | REST `POST /student/text_generation`; WebSocket `generate_text` | Case owner with the **student** role (the handler checks ownership) |
 | `GeneratePreSignedURLFunc`          | Private          | REST `GET /student/generate_presigned_url` | Users with the **student** role             |
 | `CaseGenLambdaDockerFunc`           | Private          | REST `POST /student/new_case`              | Users with the **student** role             |
 | `SummaryGenerationFunction`         | Private          | REST `GET /student/generate_summary`; WebSocket `generate_summary` | Case owner with the student role |
-| `audioToTextFunction`               | Private          | REST `GET /student/audio_to_text`; WebSocket `audio_to_text` | Case owner. REST requires the **student** role; the WebSocket action checks only that the caller is authenticated and owns the case |
+| `audioToTextFunction`               | Private          | REST `GET /student/audio_to_text`; WebSocket `audio_to_text` | Case owner with the **student** role, on REST and on the WebSocket action |
 | `PlaygroundTextGenLambdaDockerFunc` | Private          | WebSocket `playground_test`                | Users with the **admin** or **instructor** role |
-| `AssessProgressFunction`            | Private          | REST `POST /student/assess_progress`; WebSocket `assess_progress` and `playground_assess` | Case owner; playground mode requires **admin** or **instructor** |
+| `AssessProgressFunction`            | Private          | REST `POST /student/assess_progress`; WebSocket `assess_progress` and `playground_assess` | Case owner with the **student** role; playground mode requires **admin** or **instructor** |
 | `notificationServiceFunction`       | Private          | EventBridge / REST `/student/notifications*` | Internal notification service; REST routes act only on the caller's own notifications |
 | `adminLambdaAuthorizer`             | Private (VPC)    | API Gateway Lambda Authorizer (admin)      | Internal to **API Gateway**; validates JWT + DB role lookup |
 | `studentLambdaAuthorizer`           | Private (VPC)    | API Gateway Lambda Authorizer (student)    | Internal to **API Gateway**; validates JWT + DB role lookup |
@@ -623,7 +623,9 @@ All role changes, from `PUT /admin/user_role`, `POST /admin/elevate_instructor` 
 - Nobody can add or remove the `admin` role on their own account, and nobody can grant themselves the `instructor` role. Removing your own `instructor` role is allowed.
 - An administrator cannot assign themselves as an instructor to a student (`POST /admin/assign_instructor_to_student`).
 - The last administrator cannot be removed, and a user's only role cannot be removed.
+- A request that changes more than one role (such as POST /admin/lower_instructor) is all or nothing. If any change in the batch is refused, the transaction is rolled back and none of the earlier changes are saved.
 - Granting or removing the `admin` or `instructor` role through `PUT /admin/user_role`, and elevating a user through `POST /admin/elevate_instructor`, are published to the security alerts topic as well as written to `audit_log`.
+- A refused role change is also written to `audit_log`, with the action name suffixed `.denied` (for example `user_role.update.denied`). `after_state` holds `outcome: "denied"`, the reason, the HTTP status and the requested changes, and `before_state` holds the user's unchanged roles. This covers every refusal from the policy, including a self-change, removing the last administrator, and malformed requests, so filter on the reason or status when looking for probing.
 
 #### Case Workflow Controls
 

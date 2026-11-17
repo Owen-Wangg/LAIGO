@@ -92,6 +92,23 @@ exports.handler = async (event, context) => {
     const isInstructor = user.roles.includes("instructor");
     const isStaff = isAdmin || isInstructor;
 
+    // REST allows the student routes only to the student role. The socket
+    // authorizer checks no role at connect time, so the dispatcher enforces it
+    // for the actions that map to those routes.
+    const requireStudent = (attempt) => {
+      if (user.roles.includes("student")) return null;
+      logger.warn(`Unauthorized ${attempt} attempt`, {
+        userId,
+        roles: user.roles,
+      });
+      return {
+        statusCode: 403,
+        body: JSON.stringify({
+          error: "Forbidden: Student access required",
+        }),
+      };
+    };
+
     const body = JSON.parse(event.body);
     const { action, requestId } = body;
 
@@ -112,6 +129,9 @@ exports.handler = async (event, context) => {
     // Handle text generation requests
     if (action === "generate_text") {
       const { case_id, sub_route, message_content } = body;
+
+      const denied = requireStudent("text generation");
+      if (denied) return denied;
 
       // Log metadata only (scrub message_content to prevent PII leakage)
       logger.info("Invoking text generation", {
@@ -232,6 +252,9 @@ exports.handler = async (event, context) => {
     if (action === "assess_progress") {
       const { case_id, block_type } = body;
 
+      const denied = requireStudent("progress assessment");
+      if (denied) return denied;
+
       console.log("Invoking assess_progress:", {
         case_id,
         block_type,
@@ -323,21 +346,8 @@ exports.handler = async (event, context) => {
     if (action === "generate_summary") {
       const { case_id, sub_route } = body;
 
-      // RBAC Check: generating a summary writes to the case, which the REST
-      // route allows only to the student role. The socket authorizer checks no
-      // role at connect time, so enforce the same rule here.
-      if (!user.roles.includes("student")) {
-        logger.warn("Unauthorized summary generation attempt", {
-          userId,
-          roles: user.roles,
-        });
-        return {
-          statusCode: 403,
-          body: JSON.stringify({
-            error: "Forbidden: Student access required",
-          }),
-        };
-      }
+      const denied = requireStudent("summary generation");
+      if (denied) return denied;
 
       console.log("Invoking generate_summary:", {
         case_id,
@@ -376,6 +386,9 @@ exports.handler = async (event, context) => {
     // Handle audio transcription requests
     if (action === "audio_to_text") {
       const { audio_file_id, file_name, file_type, case_title, case_id } = body;
+
+      const denied = requireStudent("audio transcription");
+      if (denied) return denied;
 
       console.log("Invoking audio_to_text:", {
         audio_file_id,

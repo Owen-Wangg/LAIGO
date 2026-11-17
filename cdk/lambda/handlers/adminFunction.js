@@ -11,7 +11,7 @@ const {
   computeWhitelistReconciliation,
 } = require("./utils/whitelistUpload");
 const { Logger } = require("@aws-lambda-powertools/logger");
-const { recordAudit } = require("./utils/audit");
+const { recordAudit, recordDeniedRoleChange } = require("./utils/audit");
 const logger = new Logger({ serviceName: "AdminFunction" });
 
 
@@ -532,6 +532,16 @@ const routes = {
       );
 
       if (!decision.allowed) {
+        await recordDeniedRoleChange(sqlConnection, {
+          action: "user_role.update",
+          actorId: env.user_id,
+          actorEmail: env.user?.email,
+          subjectId: userIdToUpdate,
+          subjectEmail: userEmail,
+          rolesBefore: currentRoles,
+          attempted: [{ operation, role }],
+          decision,
+        });
         response.statusCode = decision.statusCode;
         response.body = JSON.stringify({ error: decision.error });
         return;
@@ -1680,6 +1690,16 @@ const routes = {
         );
 
         if (!decision.allowed) {
+          await recordDeniedRoleChange(sqlConnection, {
+            action: "user_role.elevate_instructor",
+            actorId: env.user_id,
+            actorEmail: env.user?.email,
+            subjectId: existingUser[0].user_id,
+            subjectEmail: instructorEmail,
+            rolesBefore,
+            attempted: [{ operation: "add", role: "instructor" }],
+            decision,
+          });
           response.statusCode = decision.statusCode;
           response.body = JSON.stringify({ error: decision.error });
           return;
@@ -1764,6 +1784,18 @@ const routes = {
         );
 
         if (!decision.allowed) {
+          await recordDeniedRoleChange(sqlConnection, {
+            action: "user_role.lower_instructor",
+            actorId: env.user_id,
+            actorEmail: env.user?.email,
+            subjectId: user_id,
+            rolesBefore,
+            attempted: [
+              { operation: "add", role: "student" },
+              { operation: "remove", role: "instructor" },
+            ],
+            decision,
+          });
           response.statusCode = decision.statusCode;
           response.body = JSON.stringify({ error: decision.error });
           return;

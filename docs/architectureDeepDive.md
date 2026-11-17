@@ -192,7 +192,7 @@
 
 ##### `audit_log`
 
-Records security-relevant changes: role changes, instructor assignments, prompt and disclaimer changes (including disclaimer deletion), role label edits, AI configuration updates, message limit and file size limit changes, signup mode changes, whitelist changes, and deletions of cases, feedback, summaries, and transcriptions (with the actor and the owning student, not the case content). The table is append-only for the application database roles: `db_setup` revokes `UPDATE`, `DELETE`, and `TRUNCATE` on it from `readwrite` and `tablecreator` on every deploy.
+Records security-relevant changes: role changes (including refused attempts, recorded with a `.denied` action suffix and `outcome: "denied"` in `after_state`), instructor assignments, prompt and disclaimer changes (including disclaimer deletion), role label edits, AI configuration updates, message limit and file size limit changes, signup mode changes, whitelist changes, and deletions of cases, feedback, summaries, and transcriptions (with the actor and the owning student, not the case content). The table is append-only for the application database roles: `db_setup` revokes `UPDATE`, `DELETE`, and `TRUNCATE` on it from `readwrite` and `tablecreator` on every deploy.
 
 | Column          | Description                                                        |
 | --------------- | ------------------------------------------------------------------ |
