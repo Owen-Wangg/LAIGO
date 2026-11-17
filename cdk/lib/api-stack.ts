@@ -3250,26 +3250,28 @@ export class ApiGatewayStack extends cdk.Stack {
       exportName: `${id}-SecurityAlertsTopicArn`,
     });
 
-    // Give every Lambda function in this stack a log group with a bounded
-    // retention period. Without one, function logs never expire and outlive the
-    // case data they describe. Done last so every function defined above is
-    // covered, including ones added later.
-    const functionLogRetention = isProd
+    // Bound how long every Lambda function's logs are kept. Without it, function
+    // logs never expire and outlive the case data they describe. Each function
+    // already has a CDK-managed log group named /aws/lambda/<function name>
+    // (@aws-cdk/aws-lambda:useCdkManagedLogGroup), so set retention and the
+    // removal policy on that group rather than adding a second one. Done last so
+    // every function defined above is covered, including ones added later.
+    const functionLogRetentionDays = isProd
       ? logs.RetentionDays.THREE_MONTHS
       : logs.RetentionDays.ONE_WEEK;
     this.node
       .findAll()
       .filter((c): c is lambda.Function => c instanceof lambda.Function)
       .forEach((fn) => {
-        const functionLogGroup = new logs.LogGroup(fn, "LogGroup", {
-          retention: functionLogRetention,
-          removalPolicy: isProd
-            ? cdk.RemovalPolicy.RETAIN
-            : cdk.RemovalPolicy.DESTROY,
-        });
-        (fn.node.defaultChild as lambda.CfnFunction).loggingConfig = {
-          logGroup: functionLogGroup.logGroupName,
-        };
+        const functionLogGroup = fn.logGroup;
+        if (!(functionLogGroup instanceof logs.LogGroup)) {
+          return;
+        }
+        (functionLogGroup.node.defaultChild as logs.CfnLogGroup).retentionInDays =
+          functionLogRetentionDays;
+        functionLogGroup.applyRemovalPolicy(
+          isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+        );
       });
   }
 }

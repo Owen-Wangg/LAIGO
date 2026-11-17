@@ -26,7 +26,7 @@ VPC Configuration:
 - By default, `VpcStack` creates a new VPC (CIDR `10.0.0.0/16`, overridable with the `vpcCidr` context value) across 2 Availability Zones in the deployment region
 - `VpcStack` also supports deploying into an existing VPC (for example, one managed by Control Tower) by setting `existingVpcId` and related values in `cdk/lib/vpc-stack.ts`
 - VPC flow logs capture all traffic to CloudWatch Logs (`/vpc/flow-logs/<StackPrefix>-VpcStack`, 3-month retention)
-- Lambda function logs go to a per-function log group with a bounded retention period (3 months in `prod`, 1 week otherwise). Function code logs lengths and identifiers, not case text, email addresses, or model output. Log groups that Lambda created before this setting existed (`/aws/lambda/<function name>`) keep their old retention and should be deleted or given a retention period by hand.
+- Each Lambda function logs to its CDK-managed log group (`/aws/lambda/<function name>`) with a bounded retention period (3 months in `prod`, 1 week otherwise). Function code logs lengths and identifiers, not case text, email addresses, or model output.
 - API Gateway caches each authorizer decision for 60 seconds (`authorizerResultTtlInSeconds` in `OpenAPI_Swagger_Definition.yaml`), so a role removed in the admin console stops working for REST calls within about a minute. An open WebSocket connection keeps the roles it had at connect time until it reaches its maximum session length.
 
 #### Subnet Configuration:
