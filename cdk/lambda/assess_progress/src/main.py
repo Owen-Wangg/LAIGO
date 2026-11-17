@@ -313,7 +313,7 @@ _SECTION_HEADER_ANYWHERE_RE = re.compile(
 )
 # Delimiter placed around every embedded turn. The system instructions tell the
 # model that text inside is data, so any copy of the tag in a message is removed
-# to stop a message closing the delimiter early.
+# until none is left, to stop a message closing the delimiter early.
 _UNTRUSTED_OPEN = "<untrusted_turn>"
 _UNTRUSTED_CLOSE = "</untrusted_turn>"
 _UNTRUSTED_TAG_RE = re.compile(r"</?\s*untrusted_turn\s*>", re.IGNORECASE)
@@ -351,9 +351,22 @@ def _neutralize_role_prefixes(content):
     return "\n".join(neutralized)
 
 
+def _strip_untrusted_tags(text):
+    """
+    Remove every copy of the delimiter tag from text.
+
+    One pass is not enough: removing the inner tag from
+    "</untrusted</untrusted_turn>_turn>" leaves a real closing tag. Each pass
+    shortens the text, so repeating until no tag remains always terminates.
+    """
+    while _UNTRUSTED_TAG_RE.search(text):
+        text = _UNTRUSTED_TAG_RE.sub("", text)
+    return text
+
+
 def _wrap_untrusted(content):
     """Neutralize message text and wrap it in the untrusted-content delimiter."""
-    cleaned = _UNTRUSTED_TAG_RE.sub("", _neutralize_role_prefixes(content))
+    cleaned = _strip_untrusted_tags(_neutralize_role_prefixes(content))
     return f"{_UNTRUSTED_OPEN}{cleaned}{_UNTRUSTED_CLOSE}"
 
 
