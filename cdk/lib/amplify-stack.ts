@@ -99,24 +99,24 @@ export class AmplifyStack extends cdk.Stack {
             cache:
               paths:
                 - 'node_modules/**/*'
-            customHeaders:
-              - pattern: '**/*'
-                headers:
-                  - key: Content-Security-Policy
-                    value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src ${connectSrc}; frame-ancestors 'none';"
-                  - key: X-Frame-Options
-                    value: DENY
-                  - key: X-Content-Type-Options
-                    value: nosniff
-                  - key: Strict-Transport-Security
-                    value: max-age=31536000; includeSubDomains
-                  - key: Referrer-Policy
-                    value: strict-origin-when-cross-origin
-            redirects:
-              - source: </^[^.]+$|.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>
-                target: /
-                status: 404
     `);
+
+    // Browser security headers. Amplify applies headers set on the app, not
+    // ones placed inside the build spec's frontend section, so they are passed
+    // as custom response headers. The build is a Vite bundle with no inline
+    // scripts and no eval, so script-src allows only same-origin files.
+    // style-src keeps 'unsafe-inline' because the UI library injects styles.
+    const contentSecurityPolicy = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "img-src 'self' data: https:",
+      "font-src 'self' data: https://fonts.gstatic.com",
+      `connect-src ${connectSrc}`,
+      "base-uri 'self'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+    ].join("; ") + ";";
 
     const username = cdk.aws_ssm.StringParameter.valueForStringParameter(
       this,
@@ -146,6 +146,19 @@ export class AmplifyStack extends cdk.Stack {
         VITE_WEBSOCKET_URL: apiStack.getWebSocketUrl(),
       },
       buildSpec: BuildSpec.fromObjectToYaml(amplifyYaml),
+      customResponseHeaders: [
+        {
+          appRoot: "frontend",
+          pattern: "**/*",
+          headers: {
+            "Content-Security-Policy": contentSecurityPolicy,
+            "X-Frame-Options": "DENY",
+            "X-Content-Type-Options": "nosniff",
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+          },
+        },
+      ],
     });
 
     amplifyApp.addCustomRule({
